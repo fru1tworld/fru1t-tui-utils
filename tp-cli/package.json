@@ -1,0 +1,49 @@
+{
+  "name": "@fru1tworld/tp",
+  "version": "2.0.0",
+  "description": "Teleport to bookmarked directories",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "tp-cli": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "lint": "biome check src",
+    "lint:fix": "biome check --write src",
+    "format": "biome format --write src",
+    "prepublishOnly": "pnpm run build"
+  },
+  "keywords": [
+    "cli",
+    "directory",
+    "bookmark",
+    "teleport",
+    "navigation"
+  ],
+  "author": "fru1tworld",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fru1tworld/tp-cli.git"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.6",
+    "@types/node": "^26.1.2",
+    "@vitest/coverage-v8": "^4.1.10",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "files": [
+    "dist",
+    "tp.bash",
+    "tp.zsh",
+    "tp.nu",
+    "tp.fish"
+  ]
+}

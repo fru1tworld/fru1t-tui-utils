@@ -1,0 +1,11 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+.git-backups/
+**/target/
+**/node_modules/
+**/dist/
+**/coverage/
+**/*.db
+**/*.log

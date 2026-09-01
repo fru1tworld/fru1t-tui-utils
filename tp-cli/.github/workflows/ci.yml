@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# 최소 권한 원칙
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [20, 22, 24]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Test with coverage
+        run: pnpm run test:coverage
+
+      - name: Smoke test CLI
+        run: |
+          pnpm link --global
+          tp-cli help
+          tp-cli list
+          tp-cli add testdir
+          tp-cli list
+          tp-cli list -r
+          tp-cli del testdir
+          tp-cli list
+          for shell in bash zsh fish nu; do tp-cli init "$shell" > /dev/null; done
+          mkdir -p "$HOME/tp-smoke"
+          eval "$(tp-cli init bash)"
+          cd "$HOME/tp-smoke" && tp add smoke
+          cd / && tp smoke
+          test "$(pwd -P)" = "$(cd "$HOME/tp-smoke" && pwd -P)"
