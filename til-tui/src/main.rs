@@ -7,6 +7,7 @@ mod domain;
 mod error;
 mod output;
 mod ui;
+mod week;
 
 use std::io::{self, Write};
 use std::time::{Duration, Instant};

@@ -1,3 +1,4 @@
+use chrono::{Datelike, Weekday};
 use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Position, Rect},
@@ -51,15 +52,24 @@ fn title(app: &App) -> Paragraph<'static> {
         Mode::Normal => "-- NORMAL --".blue().bold(),
     };
     let today = chrono::Local::now().date_naive();
-    let date = if app.selected_date == today {
-        format!(" - {} (오늘) ", app.selected_date)
+    let selected_date = if app.selected_date == today {
+        format!("{} (오늘)", app.selected_date)
     } else {
-        format!(" - {} ", app.selected_date)
+        app.selected_date.to_string()
     };
+    let week = app.calendar_week();
     Paragraph::new(Line::from(vec![
         " TIL ".cyan().bold(),
-        date.cyan().bold().reversed(),
-        format!(" {}개  ", app.selected_date_entries().len()).dim(),
+        format!(
+            " {} · {}~{} ",
+            week.label(),
+            week.start().format("%m.%d"),
+            week.end().format("%m.%d")
+        )
+        .cyan()
+        .bold()
+        .reversed(),
+        format!(" 선택 {selected_date} · {}개  ", app.week_entry_count()).dim(),
         mode,
     ]))
     .block(Block::bordered().border_type(BorderType::Rounded))
@@ -89,7 +99,7 @@ fn entry_list(app: &App, width: u16) -> List<'static> {
         .block(
             Block::bordered()
                 .border_type(BorderType::Rounded)
-                .title(" 날짜별 배운 내용 "),
+                .title(" 주간 배운 내용 "),
         )
         .highlight_style(Style::new().reversed().bold())
         .highlight_symbol("▶ ")
@@ -107,8 +117,19 @@ fn date_item(app: &App, group_index: usize) -> ListItem<'static> {
     } else {
         ""
     };
+    let weekday = match group.date.weekday() {
+        Weekday::Mon => "월",
+        Weekday::Tue => "화",
+        Weekday::Wed => "수",
+        Weekday::Thu => "목",
+        Weekday::Fri => "금",
+        Weekday::Sat => "토",
+        Weekday::Sun => "일",
+    };
     ListItem::new(Line::from(vec![
-        format!("{caret} {}{today}", group.date).cyan().bold(),
+        format!("{caret} {} ({weekday}){today}", group.date)
+            .cyan()
+            .bold(),
         format!("  {}개", group.entries.len()).dim(),
     ]))
 }
@@ -152,7 +173,7 @@ fn entry_item(entry: &TilEntry, width: usize, is_last: bool) -> ListItem<'static
 fn bottom_panel(app: &App, area: Rect) -> Paragraph<'_> {
     match app.mode {
         Mode::Insert => input_box(
-            "배운 내용 (Enter 추가 · Shift+Enter 개행 · 'out' 출력 · Esc 명령모드)",
+            "배운 내용 (←→ 주 이동 · Enter 추가 · Shift+Enter 개행 · 'out' 출력 · Esc 명령모드)",
             &app.input,
             area,
         ),
@@ -160,7 +181,7 @@ fn bottom_panel(app: &App, area: Rect) -> Paragraph<'_> {
             let mut lines = vec![
                 Line::from("i 입력   e 편집   d 삭제   u 되돌리기   y 복사   o 출력"),
                 Line::from(
-                    "←→ 접기/펼치기   Enter 토글   t 오늘   Shift+←→ 날짜 이동   ↑↓ 선택   q 종료",
+                    "←→ 주 이동   Enter 날짜 접기/펼치기   t 오늘   Shift+←→ 기록 날짜 이동   ↑↓ 선택   q 종료",
                 ),
             ];
             if !app.status.is_empty() {

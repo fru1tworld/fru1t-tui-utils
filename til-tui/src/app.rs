@@ -10,6 +10,7 @@ use crate::db::SqliteTilRepository;
 use crate::domain::{TilEntry, validate_content};
 use crate::error::{Error, Result};
 use crate::output;
+use crate::week::CalendarWeek;
 
 const UNDO_LIMIT: usize = 5;
 
@@ -124,10 +125,10 @@ impl App {
                 }
             }
             Action::Select(offset) => self.move_selection(offset),
-            Action::Collapse(collapsed) => self.set_selected_date_collapsed(collapsed),
             Action::ToggleCollapse => self.toggle_selected_date(),
+            Action::BrowseWeek(offset) => self.browse_week(offset)?,
             Action::MoveEntryByDays(offset) => self.move_selected_entry_by_days(offset)?,
-            Action::BrowseToday => self.browse_today(),
+            Action::BrowseToday => self.browse_today()?,
             Action::OpenEdit => self.open_edit_dialog(),
             Action::Delete => self.delete_selected_entry()?,
             Action::Undo => self.undo()?,
@@ -155,6 +156,17 @@ impl App {
             .iter()
             .find(|group| group.date == self.selected_date)
             .map_or(&[], |group| group.entries.as_slice())
+    }
+
+    pub(crate) fn calendar_week(&self) -> CalendarWeek {
+        CalendarWeek::containing(self.selected_date)
+    }
+
+    pub(crate) fn week_entry_count(&self) -> usize {
+        self.date_groups
+            .iter()
+            .map(|group| group.entries.len())
+            .sum()
     }
 
     fn selected_row(&self) -> Option<VisibleRow> {
@@ -219,21 +231,25 @@ impl App {
     }
 
     fn refresh(&mut self, preferred_row: Option<RowKey>) -> Result<()> {
+        let visible_week = self.calendar_week();
         let mut entries_by_date = BTreeMap::<NaiveDate, Vec<TilEntry>>::new();
-        for entry in self.repository.all_entries()? {
+        for entry in self
+            .repository
+            .entries_between(visible_week.start(), visible_week.end())?
+        {
             let date = entry.recorded_date().ok_or_else(|| {
                 Error::InvalidInput(format!("#{} 기록의 날짜를 변환할 수 없습니다", entry.id))
             })?;
             entries_by_date.entry(date).or_default().push(entry);
         }
-        entries_by_date
-            .entry(Local::now().date_naive())
-            .or_default();
 
-        self.date_groups = entries_by_date
-            .into_iter()
-            .rev()
-            .map(|(date, entries)| DateGroup { date, entries })
+        self.date_groups = self
+            .calendar_week()
+            .dates()
+            .map(|date| DateGroup {
+                date,
+                entries: entries_by_date.remove(&date).unwrap_or_default(),
+            })
             .collect();
         let available_dates = self
             .date_groups
@@ -298,7 +314,7 @@ impl App {
     }
 
     fn undo(&mut self) -> Result<()> {
-        let Some(operation) = self.undo_history.pop_back() else {
+        let Some(operation) = self.undo_history.back().cloned() else {
             self.status = "되돌릴 작업이 없어요".into();
             return Ok(());
         };
@@ -330,6 +346,7 @@ impl App {
             }
         };
 
+        self.undo_history.pop_back();
         self.refresh(Some(preferred_row))?;
         self.status = format!("되돌림 (남은 {}개)", self.undo_history.len());
         Ok(())
@@ -395,19 +412,22 @@ impl App {
         self.set_selected_date_collapsed(!self.collapsed_dates.contains(&date));
     }
 
-    fn browse_today(&mut self) {
+    fn browse_week(&mut self, offset: i64) -> Result<()> {
+        let week = self.calendar_week();
+        let day_offset = self.selected_date - week.start();
+        self.selected_date = week.shifted(offset).start() + day_offset;
+        self.refresh(Some(RowKey::Date(self.selected_date)))?;
+        self.status = self.calendar_week().label();
+        Ok(())
+    }
+
+    fn browse_today(&mut self) -> Result<()> {
         let today = Local::now().date_naive();
         self.selected_date = today;
         self.collapsed_dates.remove(&today);
-        self.rebuild_visible_rows();
-        if let Some(index) = self
-            .visible_rows
-            .iter()
-            .position(|row| self.row_key(*row) == Some(RowKey::Date(today)))
-        {
-            self.selection.select(Some(index));
-        }
+        self.refresh(Some(RowKey::Date(today)))?;
         self.status = "오늘".into();
+        Ok(())
     }
 
     fn move_selected_entry_by_days(&mut self, offset: i64) -> Result<()> {
@@ -537,6 +557,7 @@ mod tests {
     fn dates_are_first_level_rows_and_entries_are_second_level_rows() {
         let mut app = App::new(SqliteTilRepository::in_memory()).unwrap();
         let date = NaiveDate::from_ymd_opt(2026, 8, 31).unwrap();
+        app.repository.create_on(date, "기록").unwrap();
         select_date(&mut app, date);
 
         let date_index = app
@@ -555,13 +576,49 @@ mod tests {
     }
 
     #[test]
+    fn current_view_contains_monday_through_sunday_in_order() {
+        let mut app = App::new(SqliteTilRepository::in_memory()).unwrap();
+        select_date(&mut app, NaiveDate::from_ymd_opt(2026, 9, 2).unwrap());
+
+        assert_eq!(app.date_groups.len(), 7);
+        assert_eq!(
+            app.date_groups.first().unwrap().date,
+            NaiveDate::from_ymd_opt(2026, 8, 31).unwrap()
+        );
+        assert_eq!(
+            app.date_groups.last().unwrap().date,
+            NaiveDate::from_ymd_opt(2026, 9, 6).unwrap()
+        );
+    }
+
+    #[test]
+    fn browsing_weeks_preserves_the_selected_weekday() {
+        let mut app = App::new(SqliteTilRepository::in_memory()).unwrap();
+        select_date(&mut app, NaiveDate::from_ymd_opt(2026, 9, 2).unwrap());
+
+        app.apply(Action::BrowseWeek(-1)).unwrap();
+
+        assert_eq!(
+            app.selected_date,
+            NaiveDate::from_ymd_opt(2026, 8, 26).unwrap()
+        );
+        assert_eq!(app.calendar_week().label(), "2026년 8월 4주차");
+        assert_eq!(
+            app.selected_row_key(),
+            Some(RowKey::Date(app.selected_date))
+        );
+    }
+
+    #[test]
     fn collapsing_a_date_hides_only_its_entries() {
         let mut app = App::new(SqliteTilRepository::in_memory()).unwrap();
         let date = NaiveDate::from_ymd_opt(2026, 8, 31).unwrap();
+        app.repository.create_on(date, "기록 1").unwrap();
+        app.repository.create_on(date, "기록 2").unwrap();
         select_date(&mut app, date);
         let expanded_count = app.visible_rows.len();
 
-        app.apply(Action::Collapse(true)).unwrap();
+        app.apply(Action::ToggleCollapse).unwrap();
 
         assert!(app.is_collapsed(date));
         assert_eq!(app.visible_rows.len(), expanded_count - 2);
@@ -581,7 +638,7 @@ mod tests {
         let mut app = App::new(repository).unwrap();
         let today = Local::now().date_naive();
         select_date(&mut app, today);
-        app.apply(Action::Collapse(true)).unwrap();
+        app.apply(Action::ToggleCollapse).unwrap();
 
         let external_entry = external_repository
             .create_on(today, "외부에서 추가한 기록")
@@ -649,7 +706,7 @@ mod tests {
             panic!("out 입력은 출력과 함께 앱을 끝내야 한다");
         };
 
-        assert!(output.starts_with("- 2026-08-31\n  - 유니코드"));
+        assert_eq!(output, "- 2026-08-31\n  - (기록 없음)\n");
         assert!(
             !app.selected_date_entries()
                 .iter()

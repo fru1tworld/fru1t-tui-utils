@@ -18,8 +18,8 @@ pub(crate) enum Action {
     Input(InputRequest),
     CommitInsert,
     Select(isize),
-    Collapse(bool),
     ToggleCollapse,
+    BrowseWeek(i64),
     MoveEntryByDays(i64),
     BrowseToday,
     OpenEdit,
@@ -77,8 +77,8 @@ pub(crate) fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
             Enter => Some(CommitInsert),
             Up => Some(Select(-1)),
             Down => Some(Select(1)),
-            Left if !editing => Some(Collapse(true)),
-            Right if !editing => Some(Collapse(false)),
+            Left if !editing => Some(BrowseWeek(-1)),
+            Right if !editing => Some(BrowseWeek(1)),
             _ => edit_request(key).map(Input),
         },
         Mode::Normal => Some(match key.code {
@@ -95,8 +95,8 @@ pub(crate) fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
             Down | Char('j') => Select(1),
             Left if shift => MoveEntryByDays(-1),
             Right if shift => MoveEntryByDays(1),
-            Left | Char('h') => Collapse(true),
-            Right | Char('l') => Collapse(false),
+            Left | Char('h') => BrowseWeek(-1),
+            Right | Char('l') => BrowseWeek(1),
             _ => return None,
         }),
     }
@@ -128,5 +128,34 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
 
         assert_eq!(map_key(&app, key), Some(Action::CommitInsert));
+    }
+
+    #[test]
+    fn arrows_browse_weeks_when_insert_input_is_empty() {
+        let app = app();
+
+        assert_eq!(
+            map_key(&app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
+            Some(Action::BrowseWeek(-1))
+        );
+        assert_eq!(
+            map_key(&app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+            Some(Action::BrowseWeek(1))
+        );
+    }
+
+    #[test]
+    fn arrows_browse_weeks_in_normal_mode() {
+        let mut app = app();
+        app.mode = Mode::Normal;
+
+        assert_eq!(
+            map_key(&app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
+            Some(Action::BrowseWeek(-1))
+        );
+        assert_eq!(
+            map_key(&app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+            Some(Action::BrowseWeek(1))
+        );
     }
 }

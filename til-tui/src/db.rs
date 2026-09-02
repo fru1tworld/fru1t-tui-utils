@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono::{Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike};
 use rusqlite::Connection;
@@ -27,6 +28,10 @@ impl SqliteTilRepository {
 
     fn from_connection(connection: Connection) -> Result<Self> {
         let repository = Self { connection };
+        repository.connection.busy_timeout(Duration::from_secs(5))?;
+        repository
+            .connection
+            .execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
         repository.migrate()?;
         Ok(repository)
     }
@@ -54,7 +59,6 @@ impl SqliteTilRepository {
             );
             CREATE INDEX entries_created_at_idx ON entries(created_at);",
         )?;
-        insert_initial_sample(&transaction)?;
         transaction.pragma_update(None, "user_version", DATABASE_VERSION)?;
         transaction.commit()?;
         Ok(())
@@ -78,13 +82,20 @@ impl SqliteTilRepository {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    pub(crate) fn all_entries(&self) -> Result<Vec<TilEntry>> {
+    pub(crate) fn entries_between(
+        &self,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+    ) -> Result<Vec<TilEntry>> {
+        let (start_timestamp, _) = local_day_bounds(start_date)?;
+        let (_, end_timestamp) = local_day_bounds(end_date)?;
         let mut statement = self.connection.prepare(
             "SELECT id, text, created_at
              FROM entries
+             WHERE created_at >= ?1 AND created_at < ?2
              ORDER BY created_at ASC, id ASC",
         )?;
-        let rows = statement.query_map([], til_entry_from_row)?;
+        let rows = statement.query_map((start_timestamp, end_timestamp), til_entry_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -148,8 +159,10 @@ impl SqliteTilRepository {
 
     pub(crate) fn delete(&self, id: i64) -> Result<TilEntry> {
         let entry = self.find(id)?;
-        self.connection
+        let changed_rows = self
+            .connection
             .execute("DELETE FROM entries WHERE id = ?1", [id])?;
+        ensure_entry_changed(id, changed_rows)?;
         Ok(entry)
     }
 
@@ -199,44 +212,6 @@ fn local_day_bounds(date: NaiveDate) -> Result<(i64, i64)> {
     Ok((start, end))
 }
 
-fn insert_initial_sample(connection: &Connection) -> rusqlite::Result<()> {
-    const SAMPLE_ENTRIES: &[&str] = &[
-        concat!(
-            "유니코드에는 서로게이트이라는 개념이 있다.\n",
-            "유니코드에는 16비트로 표현할 수 없는 문자는 서로게이트 문자에 해당한다.\n",
-            "이때 상위 서로게이트와 하위 서로게이트로 나뉘는데 만약 이모지같은 경우 UTF-16 take와 같은 함수를 사용할 때 절반만 잘리는 경우가 있을 수 있으므로 유의해야한다.",
-        ),
-        concat!(
-            "Lens는 Seealed Trait이나 Enum처럼 합 타입의 특정 서브타입을 다루기 위한 도구이다.\n",
-            "case class Lens[S, A]\n",
-            "(get: S => A, set: (A, S) => S) 형태로 작성되거나 라이브러리가 제공하는 객체 그 자체\n",
-            "Lens Pattern\n",
-            "- Get-Set: 읽어온 값을 그대로 다시 세팅하면 원본과 동일해야 한다.\n",
-            "- Set-Get: 특정 값을 세팅한 후 읽어오면 방금 세팅한 값이 나와야 한다.\n",
-            "- Set-Set: 값을 두 번 연속 세팅하면 마지막 세팅값만 남아야 한다.\n",
-            "불변 객체의 중첩된 값을 손쉽게 조회하고 수정할 수 있도록 구현한 렌즈 패턴 라이브러리 코드이다.",
-        ),
-    ];
-
-    let sample_date = NaiveDate::from_ymd_opt(2026, 8, 31).ok_or(rusqlite::Error::InvalidQuery)?;
-    let sample_start = Local
-        .from_local_datetime(
-            &sample_date
-                .and_hms_opt(9, 0, 0)
-                .ok_or(rusqlite::Error::InvalidQuery)?,
-        )
-        .single()
-        .ok_or(rusqlite::Error::InvalidQuery)?
-        .timestamp();
-
-    let mut statement =
-        connection.prepare("INSERT INTO entries (text, created_at) VALUES (?1, ?2)")?;
-    for (index, content) in SAMPLE_ENTRIES.iter().enumerate() {
-        statement.execute((*content, sample_start + index as i64 * 60))?;
-    }
-    Ok(())
-}
-
 fn default_database_path() -> PathBuf {
     std::env::var_os("TIL_TUI_DB").map_or_else(
         || {
@@ -258,25 +233,11 @@ mod tests {
     }
 
     #[test]
-    fn initial_database_contains_the_sample_for_august_31() {
+    fn initial_database_is_empty() {
         let repository = repository();
-        let entries = repository
-            .entries_on(NaiveDate::from_ymd_opt(2026, 8, 31).unwrap())
-            .unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 8, 31).unwrap();
 
-        assert_eq!(entries.len(), 2);
-        assert_eq!(
-            entries[0].content,
-            concat!(
-                "유니코드에는 서로게이트이라는 개념이 있다.\n",
-                "유니코드에는 16비트로 표현할 수 없는 문자는 서로게이트 문자에 해당한다.\n",
-                "이때 상위 서로게이트와 하위 서로게이트로 나뉘는데 만약 이모지같은 경우 UTF-16 take와 같은 함수를 사용할 때 절반만 잘리는 경우가 있을 수 있으므로 유의해야한다.",
-            )
-        );
-        assert_eq!(
-            entries[1].content.lines().last().unwrap(),
-            "불변 객체의 중첩된 값을 손쉽게 조회하고 수정할 수 있도록 구현한 렌즈 패턴 라이브러리 코드이다."
-        );
+        assert!(repository.entries_on(date).unwrap().is_empty());
     }
 
     #[test]
@@ -317,5 +278,29 @@ mod tests {
             repository.create_on(date, "  "),
             Err(Error::InvalidInput(_))
         ));
+    }
+
+    #[test]
+    fn entries_between_returns_only_the_inclusive_date_range() {
+        let repository = repository();
+        let monday = NaiveDate::from_ymd_opt(2026, 8, 31).unwrap();
+        let sunday = NaiveDate::from_ymd_opt(2026, 9, 6).unwrap();
+        repository
+            .create_on(monday - chrono::Duration::days(1), "이전 주")
+            .unwrap();
+        repository.create_on(monday, "월요일").unwrap();
+        repository.create_on(sunday, "일요일").unwrap();
+        repository
+            .create_on(sunday + chrono::Duration::days(1), "다음 주")
+            .unwrap();
+
+        let entries = repository.entries_between(monday, sunday).unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.content.as_str())
+                .collect::<Vec<_>>(),
+            ["월요일", "일요일"]
+        );
     }
 }
