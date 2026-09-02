@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,7 +19,7 @@ describe("Shell integration files", () => {
       expect(content).toContain("tp()");
       expect(content).toContain("tp-cli");
       expect(content).toContain("__TP_CD__:");
-      expect(content).toContain('cd "');
+      expect(content).toContain('cd -- "');
     });
 
     it("contains Bash completion function", () => {
@@ -52,7 +53,7 @@ describe("Shell integration files", () => {
       expect(content).toContain("tp()");
       expect(content).toContain("tp-cli");
       expect(content).toContain("__TP_CD__:");
-      expect(content).toContain('cd "');
+      expect(content).toContain('cd -- "');
     });
 
     it("contains Zsh completion function", () => {
@@ -110,7 +111,7 @@ describe("Shell integration files", () => {
 
     it("includes all tp subcommands", () => {
       const content = fs.readFileSync(filePath, "utf-8");
-      const commands = ["add", "del", "ch", "gc", "list", "help"];
+      const commands = ["add", "set", "del", "ch", "gc", "list", "help"];
       for (const cmd of commands) {
         expect(content).toContain(`"${cmd}"`);
       }
@@ -143,7 +144,7 @@ describe("Shell integration files", () => {
 
     it("registers all tp subcommands", () => {
       const content = fs.readFileSync(filePath, "utf-8");
-      const commands = ["add", "del", "ch", "gc", "list", "help"];
+      const commands = ["add", "set", "del", "ch", "gc", "list", "help"];
       for (const cmd of commands) {
         expect(content).toContain(cmd);
       }
@@ -163,5 +164,43 @@ describe("Shell integration files", () => {
         "__fish_seen_subcommand_from list' -s r -l recent",
       );
     });
+  });
+
+  describe("wrapper exit status", () => {
+    const cases = [
+      {
+        shell: "bash",
+        wrapper: "tp.bash",
+        script:
+          'tp-cli() { printf failure; return 7; }; source "$1"; tp missing >/dev/null 2>&1',
+      },
+      {
+        shell: "zsh",
+        wrapper: "tp.zsh",
+        script:
+          'function tp-cli { print -n failure; return 7 }; source "$1"; tp missing >/dev/null 2>&1',
+      },
+      {
+        shell: "fish",
+        wrapper: "tp.fish",
+        script:
+          "function tp-cli; printf failure; return 7; end; source $argv[2]; tp missing >/dev/null 2>&1",
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      it(`${testCase.shell} preserves tp-cli failures`, () => {
+        const available = spawnSync(testCase.shell, ["--version"]);
+        if (available.error) return;
+
+        const result = spawnSync(testCase.shell, [
+          "-c",
+          testCase.script,
+          "tp-wrapper-test",
+          path.join(root, testCase.wrapper),
+        ]);
+        expect(result.status).toBe(7);
+      });
+    }
   });
 });

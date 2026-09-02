@@ -90,6 +90,21 @@ describe("main() function", () => {
     expect(output).toBe(`Updated: 'study' /old -> ${tmpDir}`);
   });
 
+  it("routes set command", () => {
+    const firstDir = path.join(tmpDir, "first");
+    const secondDir = path.join(tmpDir, "second");
+    fs.mkdirSync(firstDir);
+    fs.mkdirSync(secondDir);
+
+    const output = main(
+      ["set", "first", "./first", "second", "./second"],
+      tmpDir,
+      dataFile,
+    );
+
+    expect(output).toContain("Set 2 bookmarks:");
+  });
+
   it("routes del command", () => {
     main(["add", "todel"], tmpDir, dataFile);
     const output = main(["del", "todel"], tmpDir, dataFile);

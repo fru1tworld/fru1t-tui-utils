@@ -5,22 +5,35 @@
 tp() {
     local output
     output=$(tp-cli "$@")
+    local command_status=$?
+
+    if (( command_status != 0 )); then
+        print -r -- "$output" >&2
+        return $command_status
+    fi
 
     if [[ "$output" == __TP_CD__:* ]]; then
         local target="${output#__TP_CD__:}"
-        cd "$target"
+        builtin cd -- "$target"
     else
-        echo "$output"
+        print -r -- "$output"
     fi
 }
 
 _tp_completions_zsh() {
-    local commands="add del ch gc list help"
+    local commands="add set del ch gc list help"
     local aliases=$(tp-cli --completions 2>/dev/null)
 
     case "$words[2]" in
         add|del|ch)
             _values 'alias' ${(f)aliases}
+            ;;
+        set)
+            if (( CURRENT % 2 == 1 )); then
+                _values 'alias' ${(f)aliases}
+            else
+                _directories
+            fi
             ;;
         list)
             _values 'order' -u --utf8 -r --recent

@@ -17,6 +17,7 @@ import {
   list,
   loadConfig,
   parseListOrder,
+  set,
   shellInit,
   type TpConfig,
   version,
@@ -33,6 +34,8 @@ export function main(
   switch (command) {
     case "add":
       return add(rest[0], cwd, dataFile, config);
+    case "set":
+      return set(rest, cwd, dataFile, config);
     case "del":
       return del(rest[0], dataFile, config);
     case "ch":

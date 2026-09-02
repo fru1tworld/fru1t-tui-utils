@@ -33,6 +33,8 @@ source ~/.tp/tp.nu           # ~/.config/nushell/config.nu
 
 ```bash
 tp add <alias>      # 현재 디렉토리 북마크 추가 또는 갱신(UPSERT)
+tp set <alias> <path> [<alias> <path> ...]
+                    # 하나 이상의 북마크 경로를 지정하거나 갱신(UPSERT)
 tp <alias>          # 북마크한 디렉토리로 이동
 tp list             # 목록 — 별칭 UTF-8 바이트순
 tp list -r          # 목록 — 등록 최신순
@@ -65,6 +67,9 @@ tp add app          # Added: app -> /Users/me/projects/my-app
 
 cd ~/projects/renamed-app
 tp add app          # Updated: 'app' /Users/me/projects/my-app -> /Users/me/projects/renamed-app
+
+cd ~/projects
+tp set api ./api web ./web  # 여러 북마크 경로를 한 번에 지정
 
 cd /
 tp app              # ~/projects/renamed-app으로 이동

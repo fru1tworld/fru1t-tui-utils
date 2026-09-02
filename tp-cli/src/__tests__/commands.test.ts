@@ -23,6 +23,7 @@ import {
   parseListOrder,
   SUPPORTED_SHELLS,
   saveBookmarks,
+  set,
   shellInit,
   type TpConfig,
   version,
@@ -86,6 +87,18 @@ describe("loadBookmarks", () => {
     fs.writeFileSync(dataFile, JSON.stringify(bookmarks));
     expect(loadBookmarks(dataFile)).toEqual(bookmarks);
   });
+
+  it("reports malformed JSON as a command error", () => {
+    fs.writeFileSync(dataFile, "{");
+    expect(() => loadBookmarks(dataFile)).toThrow(
+      "Invalid JSON in bookmarks file",
+    );
+  });
+
+  it("rejects bookmarks with an invalid runtime schema", () => {
+    fs.writeFileSync(dataFile, JSON.stringify([{ alias: "x", path: 42 }]));
+    expect(() => loadBookmarks(dataFile)).toThrow("Invalid bookmarks schema");
+  });
 });
 
 describe("saveBookmarks", () => {
@@ -110,6 +123,12 @@ describe("add", () => {
   it("throws on missing alias", () => {
     expect(() => add("", "/tmp", dataFile)).toThrow(CommandError);
     expect(() => add("", "/tmp", dataFile)).toThrow("Usage: tp add <alias>");
+  });
+
+  it("rejects reserved command names", () => {
+    expect(() => add("list", "/tmp", dataFile)).toThrow(
+      "Alias 'list' is reserved",
+    );
   });
 
   it("updates an existing alias", () => {
@@ -185,6 +204,70 @@ describe("add", () => {
     );
     expect(loadBookmarks(dataFile).find((b) => b.alias === "old")?.path).toBe(
       "/old",
+    );
+  });
+});
+
+describe("set", () => {
+  it("sets multiple bookmark paths relative to cwd", () => {
+    const todoDir = path.join(tmpDir, "todo-tui");
+    const tilDir = path.join(tmpDir, "til-tui");
+    fs.mkdirSync(todoDir);
+    fs.mkdirSync(tilDir);
+
+    const result = set(
+      ["todo", "./todo-tui", "til", "./til-tui"],
+      tmpDir,
+      dataFile,
+    );
+
+    expect(result).toContain("Set 2 bookmarks:");
+    expect(loadBookmarks(dataFile)).toMatchObject([
+      { alias: "todo", path: todoDir },
+      { alias: "til", path: tilDir },
+    ]);
+  });
+
+  it("updates existing aliases and adds new aliases", () => {
+    const firstDir = path.join(tmpDir, "first");
+    const secondDir = path.join(tmpDir, "second");
+    fs.mkdirSync(firstDir);
+    fs.mkdirSync(secondDir);
+    add("Existing", tmpDir, dataFile);
+
+    set(["existing", firstDir, "new", secondDir], tmpDir, dataFile);
+
+    expect(loadBookmarks(dataFile)).toMatchObject([
+      { alias: "Existing", path: firstDir },
+      { alias: "new", path: secondDir },
+    ]);
+  });
+
+  it("rejects incomplete alias-path pairs without changing bookmarks", () => {
+    add("existing", tmpDir, dataFile);
+
+    expect(() => set(["todo"], tmpDir, dataFile)).toThrow("Usage: tp set");
+    expect(loadBookmarks(dataFile)).toMatchObject([
+      { alias: "existing", path: tmpDir },
+    ]);
+  });
+
+  it("rejects duplicate paths without changing bookmarks", () => {
+    const targetDir = path.join(tmpDir, "target");
+    fs.mkdirSync(targetDir);
+    add("existing", tmpDir, dataFile);
+
+    expect(() =>
+      set(["a", targetDir, "b", targetDir], tmpDir, dataFile),
+    ).toThrow("is assigned to both");
+    expect(loadBookmarks(dataFile)).toMatchObject([
+      { alias: "existing", path: tmpDir },
+    ]);
+  });
+
+  it("rejects paths that are not directories", () => {
+    expect(() => set(["missing", "./missing"], tmpDir, dataFile)).toThrow(
+      "Directory does not exist",
     );
   });
 });
@@ -428,6 +511,7 @@ describe("help", () => {
     expect(result).toContain("tp <alias>");
     expect(result).toContain("tp add <alias>");
     expect(result).toContain("upsert");
+    expect(result).toContain("tp set <alias> <path>");
     expect(result).toContain("tp del <alias>");
     expect(result).toContain("tp ch <old> <new>");
     expect(result).toContain("tp gc");
@@ -505,5 +589,11 @@ describe("loadConfig", () => {
     fs.writeFileSync(configFile, "not json");
     expect(() => loadConfig(configFile)).toThrow(CommandError);
     expect(() => loadConfig(configFile)).toThrow("Invalid JSON in config file");
+  });
+
+  it("rejects an invalid runtime schema", () => {
+    const configFile = path.join(tmpDir, "config.json");
+    fs.writeFileSync(configFile, JSON.stringify({ caseSensitive: "yes" }));
+    expect(() => loadConfig(configFile)).toThrow("Invalid config schema");
   });
 });
