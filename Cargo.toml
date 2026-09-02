@@ -1,0 +1,11 @@
+[workspace]
+members = ["todo-tui", "til-tui"]
+resolver = "3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"

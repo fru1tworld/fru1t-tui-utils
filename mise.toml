@@ -1,0 +1,23 @@
+[tasks.check]
+description = "Run every repository check"
+depends = ["check:rust", "check:tp"]
+
+[tasks."check:rust"]
+description = "Format, lint, and test the Rust workspace"
+run = [
+  "cargo fmt --all -- --check",
+  "cargo clippy --workspace --all-targets -- -D warnings",
+  "cargo test --workspace --all-targets",
+]
+
+[tasks."check:tp"]
+description = "Lint, test, and build tp-cli"
+dir = "tp-cli"
+run = [
+  "pnpm lint",
+  "pnpm test",
+  "pnpm build",
+  "bash -n tp.bash",
+  "zsh -n tp.zsh",
+  "fish -n tp.fish",
+]

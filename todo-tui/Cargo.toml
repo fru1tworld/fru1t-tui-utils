@@ -3,6 +3,9 @@ name = "todo-tui"
 version = "1.0.0"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
