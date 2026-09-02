@@ -1,12 +1,12 @@
-use std::collections::VecDeque;
-
 use ratatui::widgets::ListState;
 use tui_input::Input;
 
 use crate::action::{Action, Flow};
 use crate::clipboard;
-use crate::db::{Project, Store, Todo, parse_due};
+use crate::db::{Project, Store, Todo};
+use crate::dialog::{Popup, PopupKind};
 use crate::error::{Error, Result};
+use crate::undo::{Snapshot, UndoHistory};
 
 /// 최근 몇 개의 작업까지 되돌릴 수 있는지.
 const UNDO_LIMIT: usize = 5;
@@ -19,38 +19,6 @@ pub(crate) const MAX_DEPTH: usize = 3;
 pub(crate) enum Mode {
     Insert,
     Normal,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum PopupKind {
-    Edit { id: i64 },
-    Due { id: i64 },
-    Subtask { parent_id: i64 },
-    NewProject,
-    RenameProject { id: i64 },
-}
-
-impl PopupKind {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            PopupKind::Edit { .. } => "내용 편집 (Enter 저장 · Esc 취소)",
-            PopupKind::Due { .. } => "마감 (YYYY-MM-DD, 비우면 해제)",
-            PopupKind::Subtask { .. } => "하위 목표 (Enter 저장 · Esc 취소)",
-            PopupKind::NewProject => "새 프로젝트 이름 (Enter 생성 · Esc 취소)",
-            PopupKind::RenameProject { .. } => "프로젝트 이름 변경 (Enter 저장 · Esc 취소)",
-        }
-    }
-}
-
-pub(crate) struct Popup {
-    pub(crate) kind: PopupKind,
-    pub(crate) input: Input,
-}
-
-/// undo 스냅숏: 두 테이블의 전체 상태.
-struct Snapshot {
-    projects: Vec<Project>,
-    todos: Vec<Todo>,
 }
 
 pub(crate) struct App {
@@ -66,7 +34,7 @@ pub(crate) struct App {
     pub(crate) status: String,
     /// Tab 키가 눌려 있는 동안 true. 화살표를 '탭으로 보내기'로 바꾼다(kitty 프로토콜 필요).
     pub(crate) tab_held: bool,
-    undo_stack: VecDeque<Snapshot>,
+    undo_history: UndoHistory,
     data_version: i64,
 }
 
@@ -97,7 +65,7 @@ impl App {
             popup: None,
             status: String::new(),
             tab_held: false,
-            undo_stack: VecDeque::new(),
+            undo_history: UndoHistory::new(UNDO_LIMIT),
             data_version: 0,
         };
         app.reload()?;
@@ -105,9 +73,11 @@ impl App {
     }
 
     pub(crate) fn sync(&mut self) -> Result<()> {
-        let v = self.store.data_version()?;
-        if v != self.data_version {
+        let current_data_version = self.store.data_version()?;
+        if current_data_version != self.data_version {
+            self.undo_history.clear();
             self.reload()?;
+            self.status = "외부 변경 동기화됨 · 되돌리기 기록 초기화".into();
         }
         Ok(())
     }
@@ -134,7 +104,6 @@ impl App {
             Action::MoveProject(delta) => self.move_project(delta)?,
             Action::MoveToProject(delta) => self.move_to_project(delta)?,
             Action::OpenEdit => self.open_edit(),
-            Action::OpenDue => self.open_due(),
             Action::OpenSubtask => self.open_subtask(),
             Action::OpenNewProject => self.open_new_project(),
             Action::OpenRenameProject => self.open_rename_project(),
@@ -196,25 +165,46 @@ impl App {
 
     /// 현재 상태를 undo 스택에 쌓는다(가장 오래된 것부터 밀어냄).
     fn push_undo(&mut self) -> Result<()> {
-        let snap = Snapshot {
-            projects: self.store.list_projects()?,
-            todos: self.store.list_all()?,
-        };
-        if self.undo_stack.len() >= UNDO_LIMIT {
-            self.undo_stack.pop_front();
+        const SNAPSHOT_RETRY_LIMIT: usize = 3;
+
+        for _ in 0..SNAPSHOT_RETRY_LIMIT {
+            let data_version_before = self.store.data_version()?;
+            let projects = self.store.list_projects()?;
+            let todos = self.store.list_all()?;
+            let data_version_after = self.store.data_version()?;
+            if data_version_before == data_version_after {
+                self.undo_history.remember(Snapshot {
+                    projects,
+                    todos,
+                    data_version: data_version_after,
+                });
+                return Ok(());
+            }
         }
-        self.undo_stack.push_back(snap);
-        Ok(())
+
+        Err(Error::Invalid(
+            "외부 변경이 계속되어 되돌리기 지점을 만들 수 없어요".into(),
+        ))
     }
 
     fn undo(&mut self) -> Result<()> {
-        let Some(snap) = self.undo_stack.pop_back() else {
+        let Some(snapshot) = self.undo_history.latest().cloned() else {
             self.status = "되돌릴 작업이 없어요".into();
             return Ok(());
         };
-        self.store.replace_all(&snap.projects, &snap.todos)?;
+        if !self.store.replace_all_if_unchanged(
+            &snapshot.projects,
+            &snapshot.todos,
+            snapshot.data_version,
+        )? {
+            self.undo_history.clear();
+            self.reload()?;
+            self.status = "외부 변경이 있어 되돌리기를 취소했어요".into();
+            return Ok(());
+        }
+        self.undo_history.discard_latest();
         self.reload()?;
-        self.status = format!("되돌림 (남은 되돌리기 {}개)", self.undo_stack.len());
+        self.status = format!("되돌림 (남은 되돌리기 {}개)", self.undo_history.len());
         Ok(())
     }
 
@@ -434,24 +424,20 @@ impl App {
             .join("\n")
     }
 
-    /// 클립보드용 한 줄: `- [ ] 내용 (마감: YYYY-MM-DD)`, 깊이만큼 들여쓴다.
+    /// 클립보드용 한 줄: `- [ ] 내용`, 깊이만큼 들여쓴다.
     /// 내용에 줄바꿈이 들어 있어도 체크리스트가 깨지지 않게 공백으로 눕힌다.
     fn yank_line(&self, todo: &Todo, base_depth: usize) -> String {
         let indent = "  ".repeat(self.depth_of(todo.id).saturating_sub(base_depth));
         let check = if todo.done { "x" } else { " " };
         let text = todo.text.replace(['\n', '\r'], " ");
-        let due = todo
-            .due_string()
-            .map(|d| format!(" (마감: {d})"))
-            .unwrap_or_default();
-        format!("{indent}- [{check}] {text}{due}")
+        format!("{indent}- [{check}] {text}")
     }
 
     fn commit_insert(&mut self) -> Result<()> {
         let text = self.input.value().trim().to_string();
         if !text.is_empty() {
             self.push_undo()?;
-            let id = self.store.add(&text, None, None, self.project_id)?;
+            let id = self.store.add(&text, None, self.project_id)?;
             self.reload()?;
             self.select_id_or_keep(Some(id));
             self.status = "추가됨".into();
@@ -548,13 +534,6 @@ impl App {
         }
     }
 
-    fn open_due(&mut self) {
-        if let Some(t) = self.selected() {
-            let input = t.due_string().unwrap_or_default();
-            self.open_popup(PopupKind::Due { id: t.id }, input);
-        }
-    }
-
     fn open_subtask(&mut self) {
         let Some(t) = self.selected() else {
             return;
@@ -597,7 +576,6 @@ impl App {
         };
         let committed = match popup.kind {
             PopupKind::Edit { id } => self.commit_edit(id, popup.input.value()),
-            PopupKind::Due { id } => self.commit_due(id, popup.input.value()),
             PopupKind::Subtask { parent_id } => self.commit_subtask(parent_id, popup.input.value()),
             PopupKind::NewProject => self.commit_new_project(popup.input.value()),
             PopupKind::RenameProject { id } => self.commit_rename_project(id, popup.input.value()),
@@ -632,25 +610,10 @@ impl App {
         if text.is_empty() {
             return Err(Error::Invalid("내용을 입력하세요".into()));
         }
-        let due = self.find(id).and_then(|t| t.due_at);
         self.push_undo()?;
-        self.store.update(id, text, due)?;
+        self.store.update_text(id, text)?;
         self.reload()?;
         self.status = "수정됨".into();
-        Ok(())
-    }
-
-    fn commit_due(&mut self, id: i64, input: &str) -> Result<()> {
-        let value = parse_due(input)?;
-        self.push_undo()?;
-        self.store.set_due(id, value)?;
-        self.reload()?;
-        self.status = if value.is_some() {
-            "마감 설정됨"
-        } else {
-            "마감 해제됨"
-        }
-        .to_string();
         Ok(())
     }
 
@@ -694,7 +657,7 @@ mod tests {
         let store = Store::open(std::path::PathBuf::from(":memory:")).unwrap();
         let pid = store.list_projects().unwrap()[0].id;
         for i in 0..n {
-            store.add(&format!("todo {i}"), None, None, pid).unwrap();
+            store.add(&format!("todo {i}"), None, pid).unwrap();
         }
         App::new(store).unwrap()
     }
@@ -703,8 +666,8 @@ mod tests {
         let mut app = app_with_todos(2);
         let p0 = app.todos[0].id;
         let pid = app.project_id;
-        app.store.add("child A", None, Some(p0), pid).unwrap();
-        app.store.add("child B", None, Some(p0), pid).unwrap();
+        app.store.add("child A", Some(p0), pid).unwrap();
+        app.store.add("child B", Some(p0), pid).unwrap();
         app.reload().unwrap();
         app
     }
@@ -849,8 +812,8 @@ mod tests {
         let mut app = app_with_todos(1);
         let top = app.todos[0].id;
         let pid = app.project_id;
-        let mid = app.store.add("mid", None, Some(top), pid).unwrap();
-        let leaf = app.store.add("leaf", None, Some(mid), pid).unwrap();
+        let mid = app.store.add("mid", Some(top), pid).unwrap();
+        let leaf = app.store.add("leaf", Some(mid), pid).unwrap();
         app.reload().unwrap();
 
         app.select_id_or_keep(Some(top));
@@ -896,8 +859,8 @@ mod tests {
         let mut app = app_with_todos(1);
         let top = app.todos[0].id;
         let pid = app.project_id;
-        let mid = app.store.add("mid", None, Some(top), pid).unwrap();
-        app.store.add("leaf", None, Some(mid), pid).unwrap();
+        let mid = app.store.add("mid", Some(top), pid).unwrap();
+        app.store.add("leaf", Some(mid), pid).unwrap();
         app.reload().unwrap();
         assert_eq!(app.visible.len(), 3);
 
@@ -940,7 +903,7 @@ mod tests {
         // depth 2 항목의 형제를 만들어 한 번 더 넣으면 depth 3이 되므로 거부된다.
         let a = app.todos.iter().find(|t| t.text == "child A").unwrap().id;
         let pid = app.project_id;
-        let c = app.store.add("child C", None, Some(a), pid).unwrap();
+        let c = app.store.add("child C", Some(a), pid).unwrap();
         app.reload().unwrap();
         app.select_id_or_keep(Some(c));
         app.indent_selected().unwrap();
@@ -963,8 +926,8 @@ mod tests {
         let mut app = app_with_todos(2);
         let pid = app.project_id;
         let t1 = app.todos[1].id;
-        let mid = app.store.add("mid", None, Some(t1), pid).unwrap();
-        app.store.add("leaf", None, Some(mid), pid).unwrap();
+        let mid = app.store.add("mid", Some(t1), pid).unwrap();
+        app.store.add("leaf", Some(mid), pid).unwrap();
         app.reload().unwrap();
 
         app.select_id_or_keep(Some(t1));
@@ -988,8 +951,8 @@ mod tests {
         let mut app = app_with_todos(1);
         let top = app.todos[0].id;
         let pid = app.project_id;
-        let mid = app.store.add("mid", None, Some(top), pid).unwrap();
-        let leaf = app.store.add("leaf", None, Some(mid), pid).unwrap();
+        let mid = app.store.add("mid", Some(top), pid).unwrap();
+        let leaf = app.store.add("leaf", Some(mid), pid).unwrap();
         app.reload().unwrap();
 
         app.select_id_or_keep(Some(leaf));
@@ -1032,14 +995,12 @@ mod tests {
         let child_a = app.todos[1].id;
         // 완료 항목은 형제 아래로 가라앉으므로 순서도 화면과 같다.
         app.store.set_done_many(&[(child_a, true)]).unwrap();
-        app.store
-            .update(parent, "todo 0", parse_due("2026-07-01").unwrap())
-            .unwrap();
+        app.store.update_text(parent, "todo 0").unwrap();
         app.reload().unwrap();
 
         assert_eq!(
             app.yank_text(parent),
-            "- [ ] todo 0 (마감: 2026-07-01)\n  - [ ] child B\n  - [x] child A"
+            "- [ ] todo 0\n  - [ ] child B\n  - [x] child A"
         );
     }
 
@@ -1054,7 +1015,7 @@ mod tests {
     fn yank_line_flattens_newlines_in_text() {
         let mut app = app_with_todos(1);
         let id = app.todos[0].id;
-        app.store.update(id, "첫 줄\n둘째 줄", None).unwrap();
+        app.store.update_text(id, "첫 줄\n둘째 줄").unwrap();
         app.reload().unwrap();
         assert_eq!(app.yank_text(id), "- [ ] 첫 줄 둘째 줄");
     }
@@ -1214,5 +1175,44 @@ mod tests {
         assert_eq!(app.projects.len(), 2);
         let names: Vec<_> = app.projects.iter().map(|p| p.name.clone()).collect();
         assert!(names.contains(&"업무".to_string()));
+    }
+
+    #[test]
+    fn undo_is_cancelled_when_an_external_writer_changed_the_database() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let database_path =
+            std::env::temp_dir().join(format!("todo-tui-undo-{}-{unique}.db", std::process::id()));
+        let store = Store::open(database_path.clone()).unwrap();
+        let external_store = Store::open(database_path.clone()).unwrap();
+        let project_id = store.list_projects().unwrap()[0].id;
+        let mut app = App::new(store).unwrap();
+
+        app.input = Input::new("TUI 항목".into());
+        app.commit_insert().unwrap();
+        external_store.add("외부 항목", None, project_id).unwrap();
+        app.undo().unwrap();
+
+        let todo_texts = app
+            .store
+            .list(project_id)
+            .unwrap()
+            .into_iter()
+            .map(|todo| todo.text)
+            .collect::<Vec<_>>();
+        assert_eq!(todo_texts, ["TUI 항목", "외부 항목"]);
+        assert_eq!(app.status, "외부 변경이 있어 되돌리기를 취소했어요");
+
+        drop(app);
+        drop(external_store);
+        for path in [
+            database_path.clone(),
+            database_path.with_extension("db-wal"),
+            database_path.with_extension("db-shm"),
+        ] {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }

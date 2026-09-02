@@ -3,8 +3,10 @@ mod app;
 mod cli;
 mod clipboard;
 mod db;
+mod dialog;
 mod error;
 mod ui;
+mod undo;
 
 use clap::Parser;
 use ratatui::{

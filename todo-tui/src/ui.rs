@@ -1,4 +1,3 @@
-use chrono::Local;
 use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Position, Rect},
@@ -16,7 +15,6 @@ const HELP_GROUPS: &[&[&str]] = &[
         "i 입력",
         "s 하위추가",
         "e 편집",
-        "t 마감",
         "space 완료",
         "d 삭제",
         "u 되돌리기",
@@ -122,7 +120,6 @@ fn title_bar(app: &App) -> Paragraph<'static> {
 }
 
 fn todo_list(app: &App, width: u16) -> List<'static> {
-    let now = Local::now().timestamp();
     // 좌우 테두리(2) + 선택 표시 "▶ "(2)를 뺀 실제 내용 폭
     let inner = width.saturating_sub(4) as usize;
     let items: Vec<ListItem> = app
@@ -138,7 +135,7 @@ fn todo_list(app: &App, width: u16) -> List<'static> {
                     .rfind(|c| c.parent_id == Some(pid))
                     .is_some_and(|c| c.id == t.id)
             });
-            todo_line(t, now, depth, is_last, done, total, inner)
+            todo_line(t, depth, is_last, done, total, inner)
         })
         .collect();
 
@@ -206,7 +203,6 @@ fn wrap_commands(groups: &[&[&str]], width: u16) -> Vec<Line<'static>> {
 /// 깊이에 따라 들여쓰고, 자식이 있으면 접힘 캐럿과 (완료/전체) 배지를 붙인다.
 fn todo_line(
     t: &Todo,
-    now: i64,
     depth: usize,
     is_last: bool,
     done_children: usize,
@@ -240,8 +236,6 @@ fn todo_line(
             badge.dim()
         });
     }
-    push_due(&mut suffix, t, now);
-
     wrapped_item(prefix, &t.text, content_style(t.done), suffix, width)
 }
 
@@ -325,17 +319,6 @@ fn content_style(done: bool) -> Style {
     }
 }
 
-fn push_due(spans: &mut Vec<Span<'static>>, t: &Todo, now: i64) {
-    if let Some(due) = t.due_string() {
-        let badge = format!("   ⏳ {due}");
-        spans.push(if t.is_overdue(now) {
-            badge.red().bold()
-        } else {
-            badge.dim()
-        });
-    }
-}
-
 fn input_box(label: &str, input: &Input, box_width: u16) -> Paragraph<'static> {
     let scroll = input.visual_scroll(input_inner_width(box_width));
     Paragraph::new(input.value().to_string())
@@ -389,7 +372,7 @@ mod tests {
             prefix,
             "aaaa bbbb cccc",
             Style::default(),
-            vec![Span::raw("  ⏳ 2026-07-02")],
+            vec![Span::raw("  (1/2)")],
             12,
         );
         let texts: Vec<String> = lines.iter().map(line_text).collect();
@@ -397,8 +380,8 @@ mod tests {
         assert!(texts.len() > 1);
         assert_eq!(texts[0], "  [ ] aaaa");
         assert!(texts[1].starts_with("      bbbb"));
-        // 마감 배지는 잘리지 않고 마지막 줄(또는 새 줄)에 표시됨
-        assert!(texts.last().unwrap().contains("⏳ 2026-07-02"));
+        // 진행도 배지는 잘리지 않고 마지막 줄(또는 새 줄)에 표시됨
+        assert!(texts.last().unwrap().contains("(1/2)"));
     }
 
     #[test]
