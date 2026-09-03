@@ -467,6 +467,22 @@ describe("list", () => {
     expect(result.indexOf("beta")).toBeLessThan(result.indexOf("alpha"));
   });
 
+  it("shows paths under the home directory with ~", () => {
+    const home = os.homedir();
+    add("home", home, dataFile);
+    add("nested", path.join(home, "dev", "proj"), dataFile);
+    add("root", "/opt/x", dataFile);
+    const result = list(dataFile);
+    expect(result).toContain("-> ~\n");
+    expect(result).toContain("-> ~/dev/proj");
+    expect(result).toContain("-> /opt/x");
+    expect(loadBookmarks(dataFile).map((b) => b.path)).toEqual([
+      "/opt/x",
+      path.join(home, "dev", "proj"),
+      home,
+    ]);
+  });
+
   it("keeps stored order untouched when sorting", () => {
     add("beta", "/b", dataFile);
     add("alpha", "/a", dataFile);

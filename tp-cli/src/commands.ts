@@ -261,9 +261,18 @@ function isCaseSensitive(config: TpConfig): boolean {
   return config.caseSensitive ?? false;
 }
 
+export function displayPath(path: string, home: string = homedir()): string {
+  if (path === home) return "~";
+  const prefix = home.endsWith("/") ? home : `${home}/`;
+  return path.startsWith(prefix) ? `~/${path.slice(prefix.length)}` : path;
+}
+
 function formatBookmarks(bookmarks: readonly Bookmark[]): string {
   return bookmarks
-    .map((b) => `  ${b.alias.padEnd(ALIAS_COLUMN_WIDTH)} -> ${b.path}`)
+    .map(
+      (b) =>
+        `  ${b.alias.padEnd(ALIAS_COLUMN_WIDTH)} -> ${displayPath(b.path)}`,
+    )
     .join("\n");
 }
 
