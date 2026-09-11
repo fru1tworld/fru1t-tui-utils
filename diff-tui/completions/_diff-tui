@@ -7,7 +7,8 @@ local -A opt_args
 _arguments -C -s \
   '(-h --help)'{-h,--help}'[Show help]' \
   '(-V --version)'{-V,--version}'[Show version]' \
-  '-C+[Repository directory]:directory:_directories' \
+  '(-C --repo)-C+[Repository directory]:directory:_directories' \
+  '(-C --repo)--repo=[Repository directory]:directory:_directories' \
   '(--unstaged 1 2)--staged[Show staged changes]' \
   '(--staged 1 2)--unstaged[Show unstaged changes]' \
   '(-t --show-tests)'{-t,--show-tests}'[Show test files]' \
@@ -17,7 +18,9 @@ _arguments -C -s \
 
 [[ $state == branches ]] || return 1
 
-local repo=${(Q)opt_args[-C]:-.}
+local repo=${opt_args[-C]:-${opt_args[--repo]:-.}}
+repo=${(Q)repo}
+[[ $repo == '~/'* ]] && repo="$HOME/${repo[3,-1]}"
 local refs
 refs=$(command git -C "$repo" for-each-ref --format='%(refname:short)' refs/heads/ refs/remotes/ 2>/dev/null) || return 1
 [[ -n $refs ]] || return 1
