@@ -11,6 +11,7 @@ Rust 앱은 루트 Cargo workspace로 묶여 있고, `tp-cli`는 pnpm으로 관�
 | --- | --- | --- |
 | [`todo-tui`](./todo-tui) | TUI (Rust) | 프로젝트 탭과 3뎁스 하위 목표를 지원하는 vim 스타일 할 일 앱 |
 | [`til-tui`](./til-tui) | TUI (Rust) | 오늘 배운 내용을 주 단위로 쌓는 터미널 메모장 |
+| [`diff-tui`](./diff-tui) | TUI (Rust) | 테스트를 숨기고 현재 변경이나 두 브랜치의 Git diff를 탐색하는 리뷰 도구 |
 | [`tp-cli`](./tp-cli) | CLI (TypeScript) | 디렉터리를 북마크하고 한 번에 이동하는 `tp` 명령 |
 
 `todo-tui`와 `til-tui`는 ratatui + SQLite 구성을 공유합니다.

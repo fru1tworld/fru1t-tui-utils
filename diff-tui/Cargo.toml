@@ -1,0 +1,17 @@
+[package]
+name = "diff-tui"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1.0.103"
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.30"
+similar = { version = "2.7.0", default-features = false }
+two-face = "0.5.2"
+unicode-segmentation = "1.13"
+unicode-width = "0.2"

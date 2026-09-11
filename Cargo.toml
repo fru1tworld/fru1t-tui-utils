@@ -1,5 +1,5 @@
 [workspace]
-members = ["todo-tui", "til-tui"]
+members = ["todo-tui", "til-tui", "diff-tui"]
 resolver = "3"
 
 [workspace.lints.rust]
