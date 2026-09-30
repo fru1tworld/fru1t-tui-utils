@@ -546,7 +546,7 @@ fn tab_switches_preview_and_full_screen_and_keeps_directory_navigation() {
         .unwrap();
     assert_eq!(
         app.tree.current().unwrap().path,
-        Path::new(path).parent().unwrap()
+        Path::new(path).parent().unwrap().parent().unwrap()
     );
     app.handle(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
         .unwrap();

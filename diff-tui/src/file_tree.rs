@@ -98,6 +98,18 @@ impl FileTree {
                 path.push(name);
                 child = next;
             }
+            if child.directories.is_empty() && child.files.len() == 1 {
+                let (name, &change) = child.files.first_key_value().unwrap();
+                path.push(name);
+                self.entries.push(Entry {
+                    label: clean(&path.strip_prefix(parent).unwrap().to_string_lossy()),
+                    path,
+                    depth,
+                    change: Some(change),
+                    collapsed: false,
+                });
+                continue;
+            }
             let collapsed = !searching && self.closed.contains(&path);
             self.entries.push(Entry {
                 label: format!(
@@ -191,12 +203,46 @@ mod tests {
         tree.rebuild(&changes, &[0, 1], false, None, false);
         assert_eq!(tree.entries.len(), 1);
         assert!(tree.current().unwrap().collapsed);
-        tree.rebuild(&changes, &[0], true, Some(&changes[0].path), true);
+        tree.rebuild(&changes, &[0, 1], true, Some(&changes[0].path), true);
         assert_eq!(tree.current().unwrap().path, changes[0].path);
         tree.collapse_or_parent();
+        assert_eq!(tree.current().unwrap().label, "subproject/src/main/");
+    }
+
+    #[test]
+    fn directory_with_single_file_is_merged_into_file_entry() {
+        let changes: Vec<_> = [
+            "src/Main.kt",
+            "src/billing/Client.kt",
+            "src/billing/Service.kt",
+            "src/checkout/Service.kt",
+        ]
+        .into_iter()
+        .map(|path| Change {
+            path: path.into(),
+            status: 'M',
+            old_path: None,
+        })
+        .collect();
+        let mut tree = FileTree::default();
+        tree.rebuild(&changes, &[0, 1, 2, 3], false, None, false);
+        let labels: Vec<_> = tree
+            .entries
+            .iter()
+            .map(|entry| entry.label.as_str())
+            .collect();
         assert_eq!(
-            tree.current().unwrap().label,
-            "subproject/src/main/checkout/"
+            labels,
+            [
+                "src/",
+                "billing/",
+                "Client.kt",
+                "Service.kt",
+                "checkout/Service.kt",
+                "Main.kt",
+            ]
         );
+        assert_eq!(tree.entries[4].path, changes[3].path);
+        assert_eq!(tree.entries[4].change, Some(3));
     }
 }
