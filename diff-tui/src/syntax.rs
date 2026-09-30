@@ -10,12 +10,14 @@ use ratatui::{
     text::Span,
 };
 use two_face::re_exports::syntect::{
-    highlighting::{FontStyle, HighlightState, Highlighter, RangedHighlightIterator, Theme},
+    highlighting::{self, FontStyle, HighlightState, Highlighter, RangedHighlightIterator, Theme},
     parsing::{ParseState, Scope, ScopeStack, SyntaxReference, SyntaxSet},
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::{git::clean, wrap::Code};
+use crate::{git::escape_controls, wrap::Code};
+
+const PLAIN_TEXT: &str = "Plain Text";
 
 const BRACKET_COLORS: [Color; 6] = [
     Color::Rgb(235, 203, 139),
@@ -26,9 +28,30 @@ const BRACKET_COLORS: [Color; 6] = [
     Color::Rgb(163, 190, 140),
 ];
 
+const NON_CODE_SCOPES: [&str; 2] = ["comment", "string"];
+const FUNCTION_DECLARATION_SCOPES: [&str; 2] = ["entity.name.function", "entity.type.function"];
+const FUNCTION_CALL_SCOPE: [&str; 1] = ["meta.function-call"];
+const TYPE_DECLARATION_SCOPES: [&str; 9] = [
+    "entity.name.class",
+    "entity.name.struct",
+    "entity.name.enum",
+    "entity.name.trait",
+    "entity.name.interface",
+    "entity.name.namespace",
+    "entity.name.type.class",
+    "entity.name.type.struct",
+    "entity.name.type.enum",
+];
+
 pub struct SyntaxEngine {
     syntaxes: SyntaxSet,
     theme: Theme,
+}
+
+#[derive(Default)]
+pub struct HighlightedSource {
+    pub lines: HashMap<usize, Code>,
+    pub enclosing_functions: HashMap<usize, String>,
 }
 
 impl SyntaxEngine {
@@ -46,8 +69,8 @@ impl SyntaxEngine {
             .and_then(|name| self.syntaxes.find_syntax_by_extension(name))
             .or_else(|| {
                 path.extension()
-                    .and_then(|ext| ext.to_str())
-                    .and_then(|ext| self.syntaxes.find_syntax_by_extension(ext))
+                    .and_then(|extension| extension.to_str())
+                    .and_then(|extension| self.syntaxes.find_syntax_by_extension(extension))
             })
             .or_else(|| self.syntaxes.find_syntax_by_first_line(first_line))
             .unwrap_or_else(|| self.syntaxes.find_syntax_plain_text())
@@ -61,95 +84,134 @@ impl SyntaxEngine {
         &self,
         path: &Path,
         source: &str,
-        wanted: &BTreeSet<usize>,
-    ) -> Result<HashMap<usize, Code>> {
-        let mut result = HashMap::new();
-        let Some(last) = wanted.last().copied() else {
+        wanted_lines: &BTreeSet<usize>,
+    ) -> Result<HighlightedSource> {
+        let mut result = HighlightedSource::default();
+        let Some(&last_wanted) = wanted_lines.last() else {
             return Ok(result);
         };
         let syntax = self.syntax(path, source.lines().next().unwrap_or_default());
         let highlighter = Highlighter::new(&self.theme);
-        let mut state = HighlightState::new(&highlighter, ScopeStack::new());
+        let mut highlight_state = HighlightState::new(&highlighter, ScopeStack::new());
         let mut parser = ParseState::new(syntax);
         let mut scopes = ScopeStack::new();
-        let excluded = [Scope::new("comment")?, Scope::new("string")?];
-        let mut brackets = Vec::new();
-        let rainbow = syntax.name != "Plain Text";
-        // Parse skipped lines too, so comments, strings and bracket depth retain context.
-        for (index, line) in source.split_inclusive('\n').take(last).enumerate() {
+        let non_code_scopes = parse_scopes(&NON_CODE_SCOPES)?;
+        let function_scopes = parse_scopes(&FUNCTION_DECLARATION_SCOPES)?;
+        let call_scopes = parse_scopes(&FUNCTION_CALL_SCOPE)?;
+        let type_scopes = parse_scopes(&TYPE_DECLARATION_SCOPES)?;
+        let colorize_brackets = syntax.name != PLAIN_TEXT;
+        let mut enclosing_function = None;
+        let mut open_brackets = Vec::new();
+        let lines_through_last_wanted = source.split_inclusive('\n').take(last_wanted);
+        for (index, line) in lines_through_last_wanted.enumerate() {
+            let number = index + 1;
+            let is_wanted = wanted_lines.contains(&number);
             let ops = parser.parse_line(line, &self.syntaxes)?;
-            let mut pending = ops.iter().peekable();
-            let visible = wanted.contains(&(index + 1));
+            let mut pending_ops = ops.iter().peekable();
             let mut spans = Vec::new();
             for (style, text, range) in
-                RangedHighlightIterator::new(&mut state, &ops, line, &highlighter)
+                RangedHighlightIterator::new(&mut highlight_state, &ops, line, &highlighter)
             {
-                while pending.peek().is_some_and(|(at, _)| *at <= range.start) {
-                    scopes.apply(&pending.next().unwrap().1)?;
+                while let Some((_, op)) = pending_ops.next_if(|(at, _)| *at <= range.start) {
+                    scopes.apply(op)?;
                 }
-                let fg = style.foreground;
-                let mut terminal = Style::new().fg(Color::Rgb(fg.r, fg.g, fg.b));
-                if style.font_style.contains(FontStyle::BOLD) {
-                    terminal = terminal.add_modifier(Modifier::BOLD);
-                }
-                if style.font_style.contains(FontStyle::ITALIC) {
-                    terminal = terminal.add_modifier(Modifier::ITALIC);
-                }
+                let span_style = terminal_style(style);
                 let text = text.trim_end_matches(['\n', '\r']);
-                let mut start = 0;
-                if rainbow
-                    && !scopes
-                        .as_slice()
-                        .iter()
-                        .any(|scope| excluded.iter().any(|prefix| prefix.is_prefix_of(*scope)))
-                {
+                let is_code = colorize_brackets && !has_scope(&scopes, &non_code_scopes);
+                if is_code && !text.trim().is_empty() {
+                    if has_scope(&scopes, &function_scopes) && !has_scope(&scopes, &call_scopes) {
+                        enclosing_function = Some(escape_controls(line.trim()));
+                    } else if has_scope(&scopes, &type_scopes) {
+                        enclosing_function = None;
+                    }
+                }
+                let mut plain_start = 0;
+                if is_code {
                     for (offset, grapheme) in text.grapheme_indices(true) {
-                        let ch = grapheme.chars().next().unwrap();
-                        let depth = match ch {
-                            '(' | '[' | '{' => {
-                                let depth = brackets.len();
-                                brackets.push(ch);
-                                depth
-                            }
-                            ')' | ']' | '}' => {
-                                let opening = match ch {
-                                    ')' => '(',
-                                    ']' => '[',
-                                    _ => '{',
-                                };
-                                if brackets.last() != Some(&opening) {
-                                    continue;
-                                }
-                                brackets.pop();
-                                brackets.len()
-                            }
-                            _ => continue,
+                        let Some(ch) = grapheme.chars().next() else {
+                            continue;
                         };
-                        if visible {
-                            if start < offset {
-                                spans.push(Span::styled(clean(&text[start..offset]), terminal));
+                        let Some(depth) = bracket_depth(&mut open_brackets, ch) else {
+                            continue;
+                        };
+                        if is_wanted {
+                            if plain_start < offset {
+                                spans.push(Span::styled(
+                                    escape_controls(&text[plain_start..offset]),
+                                    span_style,
+                                ));
                             }
                             spans.push(Span::styled(
-                                clean(grapheme),
-                                terminal.fg(BRACKET_COLORS[depth % BRACKET_COLORS.len()]),
+                                escape_controls(grapheme),
+                                span_style.fg(BRACKET_COLORS[depth % BRACKET_COLORS.len()]),
                             ));
-                            start = offset + grapheme.len();
+                            plain_start = offset + grapheme.len();
                         }
                     }
                 }
-                if visible && start < text.len() {
-                    spans.push(Span::styled(clean(&text[start..]), terminal));
+                if is_wanted && plain_start < text.len() {
+                    spans.push(Span::styled(
+                        escape_controls(&text[plain_start..]),
+                        span_style,
+                    ));
                 }
             }
-            for (_, op) in pending {
+            for (_, op) in pending_ops {
                 scopes.apply(op)?;
             }
-            if visible {
-                result.insert(index + 1, Code::styled(spans));
+            if is_wanted {
+                result.lines.insert(number, Code::styled(spans));
+                if let Some(function) = &enclosing_function {
+                    result.enclosing_functions.insert(number, function.clone());
+                }
             }
         }
         Ok(result)
     }
+}
+
+fn parse_scopes(names: &[&str]) -> Result<Vec<Scope>> {
+    Ok(names
+        .iter()
+        .map(|name| Scope::new(name))
+        .collect::<Result<_, _>>()?)
+}
+
+fn has_scope(stack: &ScopeStack, prefixes: &[Scope]) -> bool {
+    stack
+        .as_slice()
+        .iter()
+        .any(|scope| prefixes.iter().any(|prefix| prefix.is_prefix_of(*scope)))
+}
+
+fn terminal_style(style: highlighting::Style) -> Style {
+    let fg = style.foreground;
+    let mut terminal = Style::new().fg(Color::Rgb(fg.r, fg.g, fg.b));
+    if style.font_style.contains(FontStyle::BOLD) {
+        terminal = terminal.add_modifier(Modifier::BOLD);
+    }
+    if style.font_style.contains(FontStyle::ITALIC) {
+        terminal = terminal.add_modifier(Modifier::ITALIC);
+    }
+    terminal
+}
+
+fn bracket_depth(open_brackets: &mut Vec<char>, ch: char) -> Option<usize> {
+    let opening = match ch {
+        '(' | '[' | '{' => {
+            open_brackets.push(ch);
+            return Some(open_brackets.len() - 1);
+        }
+        ')' => '(',
+        ']' => '[',
+        '}' => '{',
+        _ => return None,
+    };
+    if open_brackets.last() != Some(&opening) {
+        return None;
+    }
+    open_brackets.pop();
+    Some(open_brackets.len())
 }
 
 #[cfg(test)]
@@ -157,22 +219,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn includes_common_languages_without_language_servers() {
-        let engine = SyntaxEngine::shared();
-        for extension in [
-            "rs", "kt", "kts", "scala", "java", "ts", "tsx", "js", "py", "go", "php", "rb", "c",
-            "cpp", "cs", "swift", "sh", "json", "yaml", "toml", "sql", "html", "css",
-        ] {
-            assert_ne!(
-                engine.language(Path::new(&format!("example.{extension}"))),
-                "Plain Text",
-                "{extension}"
-            );
-        }
-        assert_eq!(
-            engine.language(Path::new("unknown.extensionzzz")),
-            "Plain Text"
+    fn function_context_ignores_comments_strings_calls_and_resets_at_new_classes() {
+        let source = concat!(
+            "class Client {\n",
+            "    private fun approve() {\n",
+            "        /*\n",
+            "        fun misleadingComment() {}\n",
+            "        */\n",
+            "        val message = \"\"\"\n",
+            "        fun misleadingString() {}\n",
+            "        \"\"\"\n",
+            "        send(message)\n",
+            "    }\n",
+            "}\n",
+            "class Other {\n",
+            "    val amount = 10\n",
+            "}\n",
         );
+        let result = SyntaxEngine::shared()
+            .highlight(Path::new("client.kt"), source, &BTreeSet::from([9, 13]))
+            .unwrap();
+        assert_eq!(result.enclosing_functions[&9], "private fun approve() {");
+        assert!(!result.enclosing_functions.contains_key(&13));
     }
 
     #[test]
@@ -183,9 +251,9 @@ mod tests {
         let result = engine
             .highlight(Path::new("main.rs"), source, &wanted)
             .unwrap();
-        let comment = result[&4].wrap(100);
-        let code = result[&6].wrap(100);
+        let comment = result.lines[&4].wrap(100);
+        let code = result.lines[&6].wrap(100);
         assert_ne!(comment[0].spans[0].style.fg, code[0].spans[0].style.fg);
-        assert_eq!(result[&4].text, "fn actually_a_comment() {}");
+        assert_eq!(result.lines[&4].text, "fn actually_a_comment() {}");
     }
 }

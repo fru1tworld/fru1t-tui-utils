@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Result, bail};
 
-use crate::git::{Change, DiffLine, Mode, Repository, Snapshot, Sources};
+use crate::git::{Change, DiffLine, Mode, Repository, Snapshot, Sources, Whitespace};
 
 #[derive(Default, PartialEq, Eq)]
 pub struct Preview {
@@ -20,23 +20,20 @@ impl Preview {
         repo: &Repository,
         snapshot: &Snapshot,
         change: &Change,
-        ignore_whitespace: bool,
+        whitespace: Whitespace,
     ) -> Result<Self> {
-        let patch = repo.patch(snapshot, change, ignore_whitespace)?;
-        let mut warning = None;
-        let sources = if patch
-            .iter()
-            .any(|line| line.old.is_some() || line.new.is_some())
-        {
+        let patch = repo.patch(snapshot, change, whitespace)?;
+        let has_code = patch.iter().any(|line| line.kind.is_code());
+        let (sources, warning) = if has_code {
             match repo.sources(snapshot, change) {
-                Ok(sources) => sources,
-                Err(error) => {
-                    warning = Some(format!("Could not read source for highlighting: {error:#}"));
-                    Sources::default()
-                }
+                Ok(sources) => (sources, None),
+                Err(error) => (
+                    Sources::default(),
+                    Some(format!("Could not read source for highlighting: {error:#}")),
+                ),
             }
         } else {
-            Sources::default()
+            (Sources::default(), None)
         };
         Ok(Self {
             patch,
@@ -50,7 +47,7 @@ pub struct Request {
     pub generation: u64,
     pub mode: Mode,
     pub selected: Option<Change>,
-    pub ignore_whitespace: bool,
+    pub whitespace: Whitespace,
 }
 
 pub struct Update {
@@ -71,7 +68,7 @@ impl Request {
                     .find(|change| change.path == selected.path)
             })
             .map(|change| {
-                Preview::read(repo, &snapshot, change, self.ignore_whitespace)
+                Preview::read(repo, &snapshot, change, self.whitespace)
                     .map(|preview| (change.clone(), preview))
             })
             .transpose()?;
@@ -84,7 +81,7 @@ type Reply = (Request, Result<Update>);
 pub struct Poller {
     requests: Sender<Request>,
     replies: Receiver<Reply>,
-    pub running: bool,
+    in_flight: bool,
 }
 
 impl Poller {
@@ -105,14 +102,18 @@ impl Poller {
         Ok(Self {
             requests,
             replies,
-            running: false,
+            in_flight: false,
         })
     }
 
+    pub fn is_reading(&self) -> bool {
+        self.in_flight
+    }
+
     pub fn request(&mut self, request: Request) -> Result<()> {
-        if !self.running {
+        if !self.in_flight {
             self.requests.send(request)?;
-            self.running = true;
+            self.in_flight = true;
         }
         Ok(())
     }
@@ -120,7 +121,7 @@ impl Poller {
     pub fn take_ready(&mut self) -> Result<Option<Reply>> {
         match self.replies.try_recv() {
             Ok(reply) => {
-                self.running = false;
+                self.in_flight = false;
                 Ok(Some(reply))
             }
             Err(TryRecvError::Empty) => Ok(None),

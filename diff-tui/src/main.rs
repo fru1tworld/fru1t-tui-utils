@@ -20,9 +20,14 @@ use std::{
 };
 
 use crate::{
-    app::App,
-    git::{Mode, Repository},
+    app::{App, KeyOutcome, TestFiles},
+    diff_view::ViewMode,
+    git::{Mode, Repository, escape_controls},
 };
+
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
+const REFRESH_CHECK_WHILE_READING: Duration = Duration::from_millis(16);
+const MAX_INPUT_WAIT: Duration = Duration::from_millis(250);
 
 #[derive(Parser, Debug)]
 #[command(
@@ -51,23 +56,39 @@ struct Cli {
     unified: bool,
 }
 
+impl Cli {
+    fn mode(&self) -> Mode {
+        match self.revisions.as_slice() {
+            [from] => Mode::Branches {
+                from: from.clone(),
+                to: "HEAD".into(),
+            },
+            [from, to] => Mode::Branches {
+                from: from.clone(),
+                to: to.clone(),
+            },
+            _ if self.staged => Mode::Staged,
+            _ if self.unstaged => Mode::Unstaged,
+            _ => Mode::Working,
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let mode = match cli.revisions.as_slice() {
-        [from] => Mode::Branches(from.clone(), "HEAD".into()),
-        [from, to] => Mode::Branches(from.clone(), to.clone()),
-        _ if cli.staged => Mode::Staged,
-        _ if cli.unstaged => Mode::Unstaged,
-        _ => Mode::Working,
-    };
     let repo = Repository::open(&cli.repo)?;
     ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
         "diff-tui needs an interactive terminal. Run diff-tui --help for usage."
     );
-    let mut app = App::new(repo, mode, cli.show_tests)?;
+    let test_files = if cli.show_tests {
+        TestFiles::Shown
+    } else {
+        TestFiles::Hidden
+    };
+    let mut app = App::new(repo, cli.mode(), test_files)?;
     if cli.unified {
-        app.display.mode = diff_view::ViewMode::Unified;
+        app.display.mode = ViewMode::Unified;
     }
     let mut terminal = ratatui::try_init()?;
     let result = run(&mut terminal, &mut app);
@@ -77,26 +98,31 @@ fn main() -> Result<()> {
 
 fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
     let mut poller = refresh::Poller::new(app.repo.root.clone())?;
-    let interval = Duration::from_secs(1);
-    let mut next_poll = Instant::now() + interval;
+    let mut next_poll = Instant::now() + POLL_INTERVAL;
     loop {
         if let Some((request, update)) = poller.take_ready()? {
             app.apply_refresh(request, update);
         }
-        if Instant::now() >= next_poll && !poller.running {
+        if Instant::now() >= next_poll && !poller.is_reading() {
             poller.request(app.refresh_request())?;
-            next_poll = Instant::now() + interval;
+            next_poll = Instant::now() + POLL_INTERVAL;
         }
         terminal.draw(|frame| ui::draw(frame, app))?;
-        if event::poll(Duration::from_millis(250))? {
-            match event::read()? {
-                Event::Key(key) if key.kind != KeyEventKind::Release => match app.handle(key) {
-                    Ok(true) => return Ok(()),
-                    Ok(false) => {}
-                    Err(error) => app.error = Some(git::clean(&format!("{error:#}"))),
-                },
-                Event::Resize(_, _) => {}
-                _ => {}
+        let input_wait = if poller.is_reading() {
+            REFRESH_CHECK_WHILE_READING
+        } else {
+            next_poll
+                .saturating_duration_since(Instant::now())
+                .min(MAX_INPUT_WAIT)
+        };
+        if event::poll(input_wait)?
+            && let Event::Key(key) = event::read()?
+            && key.kind != KeyEventKind::Release
+        {
+            match app.handle(key) {
+                Ok(KeyOutcome::Quit) => return Ok(()),
+                Ok(KeyOutcome::Continue) => {}
+                Err(error) => app.error = Some(escape_controls(&format!("{error:#}"))),
             }
         }
     }

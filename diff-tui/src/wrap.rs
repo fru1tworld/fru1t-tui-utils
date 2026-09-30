@@ -7,6 +7,24 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+const INDENT_GUIDE_STEP: usize = 4;
+
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub enum IndentGuides {
+    #[default]
+    Shown,
+    Hidden,
+}
+
+impl IndentGuides {
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Shown => Self::Hidden,
+            Self::Hidden => Self::Shown,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Code {
     pub text: String,
@@ -22,7 +40,7 @@ struct Token {
 
 impl Code {
     pub fn indent(&self) -> usize {
-        self.text.bytes().take_while(|&ch| ch == b' ').count()
+        leading_spaces(&self.text)
     }
 
     pub fn emphasize(&mut self, ranges: &[Range<usize>], style: Style) {
@@ -62,49 +80,30 @@ impl Code {
         }
     }
 
-    pub fn review(&self, width: usize, trim: usize, guides: bool) -> Vec<Line<'static>> {
+    pub fn wrap_indented(
+        &self,
+        width: usize,
+        trim: usize,
+        guides: IndentGuides,
+    ) -> Vec<Line<'static>> {
         let trim = trim.min(self.indent());
-        let mut skip = trim;
+        let mut remaining_trim = trim;
         let spans = self
             .tokens
             .iter()
             .flat_map(|token| &token.spans)
             .filter_map(|span| {
-                let cut = skip.min(span.content.len());
-                skip -= cut;
+                let cut = remaining_trim.min(span.content.len());
+                remaining_trim -= cut;
                 (cut < span.content.len())
                     .then(|| Span::styled(span.content[cut..].to_owned(), span.style))
             })
             .collect();
         let mut rows = Self::styled(spans).wrap(width);
-        if guides && let Some(first) = rows.first_mut() {
-            let mut spans = Vec::new();
-            let mut column = trim;
-            let mut leading = true;
-            for span in &first.spans {
-                let spaces = if leading {
-                    span.content.bytes().take_while(|&ch| ch == b' ').count()
-                } else {
-                    0
-                };
-                for _ in 0..spaces {
-                    let guide = column > 0 && column.is_multiple_of(4);
-                    spans.push(Span::styled(
-                        if guide { "│" } else { " " },
-                        if guide {
-                            span.style.fg(Color::DarkGray)
-                        } else {
-                            span.style
-                        },
-                    ));
-                    column += 1;
-                }
-                if spaces < span.content.len() {
-                    leading = false;
-                    spans.push(Span::styled(span.content[spaces..].to_owned(), span.style));
-                }
-            }
-            first.spans = spans;
+        if guides == IndentGuides::Shown
+            && let Some(first) = rows.first_mut()
+        {
+            draw_indent_guides(first, trim);
         }
         rows
     }
@@ -124,7 +123,7 @@ impl Code {
                 (range, span)
             })
             .collect();
-        let tokens = token_ranges(&text)
+        let tokens = lexeme_ranges(&text)
             .into_iter()
             .map(|range| {
                 let start = pieces.partition_point(|(piece, _)| piece.end <= range.start);
@@ -170,94 +169,142 @@ impl Code {
     }
 }
 
-// Lexical boundaries are independent of theme colors: a string may have several colors
-// and consecutive identifiers may share one color. Never split a grapheme or lexeme.
-pub(crate) fn token_ranges(text: &str) -> Vec<Range<usize>> {
+fn leading_spaces(text: &str) -> usize {
+    text.bytes().take_while(|&byte| byte == b' ').count()
+}
+
+fn draw_indent_guides(line: &mut Line<'static>, first_column: usize) {
+    let mut spans = Vec::new();
+    let mut column = first_column;
+    let mut in_indent = true;
+    for span in &line.spans {
+        let spaces = if in_indent {
+            leading_spaces(&span.content)
+        } else {
+            0
+        };
+        for _ in 0..spaces {
+            let guide = column > 0 && column.is_multiple_of(INDENT_GUIDE_STEP);
+            spans.push(if guide {
+                Span::styled("│", span.style.fg(Color::DarkGray))
+            } else {
+                Span::styled(" ", span.style)
+            });
+            column += 1;
+        }
+        if spaces < span.content.len() {
+            in_indent = false;
+            spans.push(Span::styled(span.content[spaces..].to_owned(), span.style));
+        }
+    }
+    line.spans = spans;
+}
+
+pub(crate) fn lexeme_ranges(text: &str) -> Vec<Range<usize>> {
     let graphemes: Vec<_> = text.grapheme_indices(true).collect();
     let mut ranges = Vec::new();
-    let mut i = 0;
-    while i < graphemes.len() {
-        let start = i;
-        let current = graphemes[i].1;
-        if matches!(current, "\"" | "'" | "`") {
-            let triple = i + 2 < graphemes.len()
-                && graphemes[i + 1].1 == current
-                && graphemes[i + 2].1 == current;
-            let delimiter = if triple { 3 } else { 1 };
-            let mut end = i + delimiter;
-            let mut closed = false;
-            while end < graphemes.len() {
-                if graphemes[end].1 == "\\" {
-                    end += 2;
-                    continue;
-                }
-                if (0..delimiter).all(|n| {
-                    graphemes
-                        .get(end + n)
-                        .is_some_and(|(_, value)| *value == current)
-                }) {
-                    end += delimiter;
-                    closed = true;
-                    break;
-                }
-                end += 1;
+    let mut cursor = 0;
+    while cursor < graphemes.len() {
+        let start = cursor;
+        let current = graphemes[start].1;
+        cursor = if matches!(current, "\"" | "'" | "`") {
+            match quoted_literal_end(&graphemes, start) {
+                Some(end) => end,
+                None if current == "'" => start + 1,
+                None => graphemes.len(),
             }
-            i = if closed || current != "'" {
-                end.min(graphemes.len())
-            } else {
-                i + 1
-            };
-        } else if current.chars().all(char::is_whitespace) {
-            i += 1;
-            while i < graphemes.len() && graphemes[i].1.chars().all(char::is_whitespace) {
-                i += 1;
-            }
-        } else if current.chars().all(|ch| ch.is_ascii_digit()) {
-            i += 1;
-            while i < graphemes.len() {
-                let next = graphemes[i].1;
-                let exponent_sign = matches!(next, "+" | "-")
-                    && matches!(graphemes[i - 1].1, "e" | "E" | "p" | "P");
-                let decimal = next == "."
-                    && graphemes
-                        .get(i + 1)
-                        .is_some_and(|(_, next)| next.chars().all(|ch| ch.is_ascii_digit()));
-                if identifier(next) || exponent_sign || decimal {
-                    i += 1;
-                } else {
-                    break;
-                }
-            }
-        } else if identifier(current) {
-            i += 1;
-            while i < graphemes.len() && identifier(graphemes[i].1) {
-                i += 1;
-            }
-        } else if operator(current) {
-            i += 1;
-            while i < graphemes.len() && operator(graphemes[i].1) {
-                i += 1;
-            }
+        } else if is_whitespace(current) {
+            advance_while(&graphemes, start + 1, is_whitespace)
+        } else if is_digit(current) {
+            number_end(&graphemes, start)
+        } else if is_identifier(current) {
+            advance_while(&graphemes, start + 1, is_identifier)
+        } else if is_operator(current) {
+            advance_while(&graphemes, start + 1, is_operator)
         } else {
-            i += 1;
-        }
+            start + 1
+        };
         let end = graphemes
-            .get(i)
-            .map(|(offset, _)| *offset)
-            .unwrap_or(text.len());
+            .get(cursor)
+            .map_or(text.len(), |(offset, _)| *offset);
         ranges.push(graphemes[start].0..end);
     }
     ranges
 }
 
-fn identifier(grapheme: &str) -> bool {
+fn quoted_literal_end(graphemes: &[(usize, &str)], start: usize) -> Option<usize> {
+    let quote = graphemes[start].1;
+    let is_quote_at = |index: usize| {
+        graphemes
+            .get(index)
+            .is_some_and(|(_, value)| *value == quote)
+    };
+    let delimiter = if is_quote_at(start + 1) && is_quote_at(start + 2) {
+        3
+    } else {
+        1
+    };
+    let mut cursor = start + delimiter;
+    while cursor < graphemes.len() {
+        if graphemes[cursor].1 == "\\" {
+            cursor += 2;
+        } else if (0..delimiter).all(|offset| is_quote_at(cursor + offset)) {
+            return Some(cursor + delimiter);
+        } else {
+            cursor += 1;
+        }
+    }
+    None
+}
+
+fn number_end(graphemes: &[(usize, &str)], start: usize) -> usize {
+    let mut cursor = start + 1;
+    while let Some(&(_, next)) = graphemes.get(cursor) {
+        let exponent_sign =
+            matches!(next, "+" | "-") && matches!(graphemes[cursor - 1].1, "e" | "E" | "p" | "P");
+        let decimal_point = next == "."
+            && graphemes
+                .get(cursor + 1)
+                .is_some_and(|(_, after)| is_digit(after));
+        if is_identifier(next) || exponent_sign || decimal_point {
+            cursor += 1;
+        } else {
+            break;
+        }
+    }
+    cursor
+}
+
+fn advance_while(
+    graphemes: &[(usize, &str)],
+    mut cursor: usize,
+    accepts: fn(&str) -> bool,
+) -> usize {
+    while graphemes
+        .get(cursor)
+        .is_some_and(|(_, grapheme)| accepts(grapheme))
+    {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn is_whitespace(grapheme: &str) -> bool {
+    grapheme.chars().all(char::is_whitespace)
+}
+
+fn is_digit(grapheme: &str) -> bool {
+    grapheme.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn is_identifier(grapheme: &str) -> bool {
     grapheme
         .chars()
         .next()
         .is_some_and(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$')
 }
 
-fn operator(grapheme: &str) -> bool {
+fn is_operator(grapheme: &str) -> bool {
     grapheme.len() == 1 && "+-*/%=!<>:&|^?~.".contains(grapheme)
 }
 
@@ -275,15 +322,15 @@ mod tests {
 
     #[test]
     fn wraps_tokens_independently_of_highlight_spans() {
-        let source = "val paymentId = \"hello world\" ?: fallbackValue";
+        let source = "val requestId = \"hello world\" ?: fallbackValue";
         let code = Code::styled(vec![
-            Span::styled("val payment", Style::new().red()),
+            Span::styled("val request", Style::new().red()),
             Span::styled("Id = \"hello", Style::new().green()),
             Span::styled(" world\" ?: fallbackValue", Style::new().blue()),
         ]);
         let lines = code.wrap(12);
         assert_eq!(lines.iter().map(text).collect::<String>(), source);
-        for token in ["paymentId", "\"hello world\"", "?:", "fallbackValue"] {
+        for token in ["requestId", "\"hello world\"", "?:", "fallbackValue"] {
             assert!(
                 lines.iter().any(|line| text(line).contains(token)),
                 "{token}"
@@ -299,11 +346,11 @@ mod tests {
 
     #[test]
     fn preserves_unicode_graphemes_numbers_and_overlong_tokens() {
-        let code = Code::plain("결제금액 cafe\u{301} 👩‍💻 12.25e-3 veryLongIdentifier");
+        let code = Code::plain("합계금액 cafe\u{301} 👩‍💻 12.25e-3 veryLongIdentifier");
         let lines = code.wrap(7);
         assert_eq!(lines.iter().map(text).collect::<String>(), code.text);
         for token in [
-            "결제금액",
+            "합계금액",
             "cafe\u{301}",
             "👩‍💻",
             "12.25e-3",

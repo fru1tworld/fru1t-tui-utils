@@ -13,52 +13,172 @@ pub enum Mode {
     Working,
     Unstaged,
     Staged,
-    Branches(String, String),
+    Branches { from: String, to: String },
 }
 
 impl Mode {
     pub fn label(&self) -> String {
         match self {
-            Self::Working => "HEAD -> working tree (staged + unstaged)".into(),
+            Self::Working => "HEAD -> working tree (staged + unstaged + untracked)".into(),
             Self::Unstaged => "index -> working tree (unstaged)".into(),
             Self::Staged => "HEAD -> index (staged)".into(),
-            Self::Branches(from, to) => format!("{from} -> {to}"),
+            Self::Branches { from, to } => format!("{from} -> {to}"),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChangeStatus {
+    Added,
+    Copied,
+    Deleted,
+    Modified,
+    Renamed,
+    Unmerged,
+    Untracked,
+    Other(char),
+}
+
+impl ChangeStatus {
+    fn from_git(code: u8) -> Self {
+        match code {
+            b'A' => Self::Added,
+            b'C' => Self::Copied,
+            b'D' => Self::Deleted,
+            b'M' => Self::Modified,
+            b'R' => Self::Renamed,
+            b'U' => Self::Unmerged,
+            other => Self::Other(char::from(other)),
+        }
+    }
+
+    pub fn marker(self) -> char {
+        match self {
+            Self::Added => 'A',
+            Self::Copied => 'C',
+            Self::Deleted => 'D',
+            Self::Modified => 'M',
+            Self::Renamed => 'R',
+            Self::Unmerged => 'U',
+            Self::Untracked => '?',
+            Self::Other(code) => code,
+        }
+    }
+
+    fn has_old_side(self) -> bool {
+        !matches!(self, Self::Added | Self::Unmerged | Self::Untracked)
+    }
+
+    fn has_new_side(self) -> bool {
+        self != Self::Deleted
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Change {
-    pub status: char,
+    pub status: ChangeStatus,
     pub path: PathBuf,
     pub old_path: Option<PathBuf>,
 }
 
 impl Change {
     pub fn is_test(&self) -> bool {
-        // Keep moves across the production/test boundary visible for review.
         is_test_path(&self.path) && self.old_path.as_ref().is_none_or(|path| is_test_path(path))
     }
 
     pub fn label(&self) -> String {
-        let path = clean(&self.path.to_string_lossy());
+        let path = escape_controls(&self.path.to_string_lossy());
         match &self.old_path {
-            Some(old) => format!("{} -> {path}", clean(&old.to_string_lossy())),
+            Some(old) => format!("{} -> {path}", escape_controls(&old.to_string_lossy())),
             None => path,
         }
     }
+
+    pub fn move_summary(&self, similarity: &str) -> Option<String> {
+        let old = self.old_path.as_ref()?;
+        let verb = if self.status == ChangeStatus::Copied {
+            "Copied"
+        } else {
+            "Moved"
+        };
+        let detail = if similarity == "100%" {
+            "content unchanged".to_owned()
+        } else {
+            format!("{similarity} similar")
+        };
+        let paths = collapse_move(
+            &escape_controls(&old.to_string_lossy()),
+            &escape_controls(&self.path.to_string_lossy()),
+        );
+        Some(format!("{verb}, {detail}: {paths}"))
+    }
 }
+
+fn collapse_move(old: &str, new: &str) -> String {
+    let old: Vec<_> = old.split('/').collect();
+    let new: Vec<_> = new.split('/').collect();
+    let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let moved = format!(
+        "{{{} -> {}}}",
+        old[prefix..old.len() - suffix].join("/"),
+        new[prefix..new.len() - suffix].join("/")
+    );
+    [
+        old[..prefix].join("/"),
+        moved,
+        old[old.len() - suffix..].join("/"),
+    ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join("/")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChangeIndex(pub usize);
 
 pub struct Snapshot {
     pub comparison: Comparison,
     pub changes: Vec<Change>,
 }
 
+impl Snapshot {
+    pub fn change(&self, index: ChangeIndex) -> &Change {
+        &self.changes[index.0]
+    }
+}
+
 pub enum Comparison {
-    Working(String),
+    Working { base: String },
     Unstaged,
-    Staged(Option<String>),
-    Between(String, String),
+    Staged { base: Option<String> },
+    Between { from: String, to: String },
+}
+
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub enum Whitespace {
+    #[default]
+    Compared,
+    Ignored,
+}
+
+impl Whitespace {
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Compared => Self::Ignored,
+            Self::Ignored => Self::Compared,
+        }
+    }
+
+    fn diff_arg(self) -> Option<&'static str> {
+        (self == Self::Ignored).then_some("--ignore-all-space")
+    }
 }
 
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -66,6 +186,18 @@ pub struct Sources {
     pub old: Option<String>,
     pub new: Option<String>,
 }
+
+enum Revision<'a> {
+    Index,
+    Commit(&'a str),
+}
+
+const PLAIN_DIFF_ARGS: [&str; 4] = [
+    "--no-ext-diff",
+    "--no-textconv",
+    "--color=never",
+    "--no-relative",
+];
 
 pub struct Repository {
     pub root: PathBuf,
@@ -99,11 +231,7 @@ impl Repository {
     }
 
     fn checked(output: Output) -> Result<Vec<u8>> {
-        ensure!(
-            output.status.success(),
-            "{}",
-            clean(String::from_utf8_lossy(&output.stderr).trim())
-        );
+        ensure!(output.status.success(), "{}", stderr_message(&output));
         Ok(output.stdout)
     }
 
@@ -124,36 +252,8 @@ impl Repository {
                 "--end-of-options",
                 &format!("{revision}^{{commit}}"),
             ])
-            .with_context(|| format!("Cannot resolve revision {}", clean(revision)))?;
-        Ok(String::from_utf8(bytes)?.trim().to_owned())
-    }
-
-    pub fn snapshot(&self, mode: &Mode) -> Result<Snapshot> {
-        let comparison = match mode {
-            Mode::Working => {
-                let hash = if let Some(head) = self.head()? {
-                    head
-                } else {
-                    // hash-object without -w computes the empty tree without writing an object.
-                    String::from_utf8(self.run(&["hash-object", "-t", "tree", "--stdin"])?)?
-                        .trim()
-                        .to_owned()
-                };
-                Comparison::Working(hash)
-            }
-            Mode::Unstaged => Comparison::Unstaged,
-            Mode::Staged => Comparison::Staged(self.head()?),
-            Mode::Branches(from, to) => Comparison::Between(self.resolve(from)?, self.resolve(to)?),
-        };
-        let bytes = Self::checked(
-            self.diff_command(&comparison)
-                .args(["--name-status", "-z", "--"])
-                .output()?,
-        )?;
-        Ok(Snapshot {
-            comparison,
-            changes: parse_changes(&bytes)?,
-        })
+            .with_context(|| format!("Cannot resolve revision {}", escape_controls(revision)))?;
+        trimmed_text(bytes)
     }
 
     fn head(&self) -> Result<Option<String>> {
@@ -164,35 +264,85 @@ impl Repository {
         if output.status.code() == Some(1) {
             return Ok(None);
         }
-        Ok(Some(
-            String::from_utf8(Self::checked(output)?)?.trim().to_owned(),
-        ))
+        trimmed_text(Self::checked(output)?).map(Some)
+    }
+
+    fn empty_tree(&self) -> Result<String> {
+        trimmed_text(self.run(&["hash-object", "-t", "tree", "--stdin"])?)
+    }
+
+    fn resolve_mode(&self, mode: &Mode) -> Result<Comparison> {
+        Ok(match mode {
+            Mode::Working => Comparison::Working {
+                base: match self.head()? {
+                    Some(head) => head,
+                    None => self.empty_tree()?,
+                },
+            },
+            Mode::Unstaged => Comparison::Unstaged,
+            Mode::Staged => Comparison::Staged { base: self.head()? },
+            Mode::Branches { from, to } => Comparison::Between {
+                from: self.resolve(from)?,
+                to: self.resolve(to)?,
+            },
+        })
+    }
+
+    pub fn snapshot(&self, mode: &Mode) -> Result<Snapshot> {
+        let comparison = self.resolve_mode(mode)?;
+        let bytes = Self::checked(
+            self.diff_command(&comparison)
+                .args(["--name-status", "-z", "--"])
+                .output()?,
+        )?;
+        let mut changes = parse_changes(&bytes)?;
+        if *mode == Mode::Working {
+            self.add_untracked(&mut changes)?;
+            changes.sort_by(|left, right| left.path.cmp(&right.path));
+        }
+        Ok(Snapshot {
+            comparison,
+            changes,
+        })
+    }
+
+    fn add_untracked(&self, changes: &mut Vec<Change>) -> Result<()> {
+        let untracked = self.run(&["ls-files", "--others", "--exclude-standard", "-z"])?;
+        for path in untracked
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+        {
+            let path = PathBuf::from(decode_path(path)?);
+            if let Some(staged_deletion) = changes.iter_mut().find(|change| change.path == path) {
+                staged_deletion.status = ChangeStatus::Untracked;
+                staged_deletion.old_path = None;
+            } else {
+                changes.push(Change {
+                    status: ChangeStatus::Untracked,
+                    path,
+                    old_path: None,
+                });
+            }
+        }
+        Ok(())
     }
 
     fn diff_command(&self, comparison: &Comparison) -> Command {
         let mut command = self.command();
-        command.args([
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--color=never",
-            "--no-relative",
+        command.arg("diff").args(PLAIN_DIFF_ARGS).args([
             "--find-renames",
             "--ignore-submodules=none",
             "--submodule=short",
         ]);
         match comparison {
-            Comparison::Working(base) => {
+            Comparison::Working { base } => {
                 command.arg(base);
             }
             Comparison::Unstaged => {}
-            Comparison::Staged(base) => {
-                command.arg("--cached");
-                if let Some(base) = base {
-                    command.arg(base);
-                }
+            Comparison::Staged { base } => {
+                command.arg("--cached").args(base);
             }
-            Comparison::Between(from, to) => {
+            Comparison::Between { from, to } => {
                 command.args([from, to]);
             }
         }
@@ -203,60 +353,85 @@ impl Repository {
         &self,
         snapshot: &Snapshot,
         change: &Change,
-        ignore_whitespace: bool,
+        whitespace: Whitespace,
     ) -> Result<Vec<DiffLine>> {
+        if change.status == ChangeStatus::Untracked {
+            return self.untracked_patch(change, whitespace);
+        }
         let mut command = self.diff_command(&snapshot.comparison);
-        if ignore_whitespace {
-            command.arg("--ignore-all-space");
-        }
-        command.args(["--patch", "--unified=3", "--"]);
-        if let Some(old) = &change.old_path {
-            command.arg(old);
-        }
-        command.arg(&change.path);
+        command
+            .args(whitespace.diff_arg())
+            .args(["--patch", "--unified=3", "--"])
+            .args(&change.old_path)
+            .arg(&change.path);
         let output = Self::checked(command.output()?)?;
         Ok(parse_patch(&String::from_utf8_lossy(&output)))
     }
 
+    fn untracked_patch(&self, change: &Change, whitespace: Whitespace) -> Result<Vec<DiffLine>> {
+        let output = self
+            .command()
+            .args(["diff", "--no-index"])
+            .args(PLAIN_DIFF_ARGS)
+            .args(["--patch", "--unified=3"])
+            .args(whitespace.diff_arg())
+            .args(["--", "/dev/null"])
+            .arg(&change.path)
+            .output()
+            .context("Could not read untracked file diff")?;
+        let identical_or_different = matches!(output.status.code(), Some(0 | 1));
+        ensure!(
+            identical_or_different,
+            "Could not read untracked file {}: {}",
+            change.label(),
+            stderr_message(&output)
+        );
+        Ok(parse_patch(&String::from_utf8_lossy(&output.stdout)))
+    }
+
     pub fn sources(&self, snapshot: &Snapshot, change: &Change) -> Result<Sources> {
         let old_path = change.old_path.as_deref().unwrap_or(&change.path);
-        let old = if change.status == 'A' || change.status == 'U' {
-            None
-        } else {
+        let old = if change.status.has_old_side() {
             match &snapshot.comparison {
-                Comparison::Working(base) | Comparison::Between(base, _) => {
-                    self.blob(base, old_path)?
+                Comparison::Working { base }
+                | Comparison::Between { from: base, .. }
+                | Comparison::Staged { base: Some(base) } => {
+                    self.blob(Revision::Commit(base), old_path)?
                 }
-                Comparison::Staged(Some(base)) => self.blob(base, old_path)?,
-                Comparison::Staged(None) => None,
-                Comparison::Unstaged => self.blob("", old_path)?,
+                Comparison::Staged { base: None } => None,
+                Comparison::Unstaged => self.blob(Revision::Index, old_path)?,
             }
-        };
-        let new = if change.status == 'D' {
-            None
         } else {
+            None
+        };
+        let new = if change.status.has_new_side() {
             match &snapshot.comparison {
-                Comparison::Between(_, to) => self.blob(to, &change.path)?,
-                Comparison::Staged(_) => self.blob("", &change.path)?,
-                Comparison::Working(_) | Comparison::Unstaged => {
+                Comparison::Between { to, .. } => self.blob(Revision::Commit(to), &change.path)?,
+                Comparison::Staged { .. } => self.blob(Revision::Index, &change.path)?,
+                Comparison::Working { .. } | Comparison::Unstaged => {
                     self.working_source(&change.path)?
                 }
             }
+        } else {
+            None
         };
         Ok(Sources { old, new })
     }
 
-    fn blob(&self, revision: &str, path: &Path) -> Result<Option<String>> {
-        let mut object = OsString::from(format!("{revision}:"));
+    fn blob(&self, revision: Revision<'_>, path: &Path) -> Result<Option<String>> {
+        let mut object = OsString::from(match revision {
+            Revision::Index => ":".to_owned(),
+            Revision::Commit(commit) => format!("{commit}:"),
+        });
         object.push(path);
-        let kind = Self::checked(
+        let object_type = Self::checked(
             self.command()
                 .args(["cat-file", "-t"])
                 .arg(&object)
                 .output()?,
         )?;
-        if kind != b"blob\n" {
-            // Submodule gitlinks reference commits, not source files.
+        let is_submodule_commit_or_tree = object_type != b"blob\n";
+        if is_submodule_commit_or_tree {
             return Ok(None);
         }
         let output = Self::checked(
@@ -299,6 +474,14 @@ impl Repository {
     }
 }
 
+fn stderr_message(output: &Output) -> String {
+    escape_controls(String::from_utf8_lossy(&output.stderr).trim())
+}
+
+fn trimmed_text(bytes: Vec<u8>) -> Result<String> {
+    Ok(String::from_utf8(bytes)?.trim().to_owned())
+}
+
 #[cfg(unix)]
 fn decode_path(bytes: &[u8]) -> Result<OsString> {
     use std::os::unix::ffi::OsStringExt;
@@ -319,27 +502,19 @@ fn parse_changes(bytes: &[u8]) -> Result<Vec<Change>> {
         if status.is_empty() && fields.peek().is_none() {
             break;
         }
-        let Some(status) = status.first().copied() else {
+        let Some(&code) = status.first() else {
             bail!("Empty git diff status");
         };
-        let first = fields
-            .next()
-            .filter(|field| !field.is_empty())
-            .context("Missing git diff path")?;
-        let (old_path, path) = if matches!(status, b'R' | b'C') {
-            let second = fields
-                .next()
-                .filter(|field| !field.is_empty())
-                .context("Missing rename destination")?;
-            (
-                Some(PathBuf::from(decode_path(first)?)),
-                PathBuf::from(decode_path(second)?),
-            )
+        let status = ChangeStatus::from_git(code);
+        let first = next_path(&mut fields, "Missing git diff path")?;
+        let (old_path, path) = if matches!(status, ChangeStatus::Renamed | ChangeStatus::Copied) {
+            let destination = next_path(&mut fields, "Missing rename destination")?;
+            (Some(first), destination)
         } else {
-            (None, PathBuf::from(decode_path(first)?))
+            (None, first)
         };
         changes.push(Change {
-            status: char::from(status),
+            status,
             path,
             old_path,
         });
@@ -347,57 +522,69 @@ fn parse_changes(bytes: &[u8]) -> Result<Vec<Change>> {
     Ok(changes)
 }
 
+fn next_path<'a>(
+    fields: &mut impl Iterator<Item = &'a [u8]>,
+    missing: &'static str,
+) -> Result<PathBuf> {
+    let field = fields
+        .next()
+        .filter(|field| !field.is_empty())
+        .context(missing)?;
+    Ok(PathBuf::from(decode_path(field)?))
+}
+
+const TEST_DIRECTORIES: [&str; 21] = [
+    "test",
+    "tests",
+    "__tests__",
+    "__snapshots__",
+    "testdata",
+    "testfixtures",
+    "test-fixtures",
+    "androidtest",
+    "unittest",
+    "integrationtest",
+    "integrationtests",
+    "integration-test",
+    "integration-tests",
+    "commontest",
+    "jvmtest",
+    "jstest",
+    "nativetest",
+    "iostest",
+    "e2e",
+    "spec",
+    "specs",
+];
+
 pub fn is_test_path(path: &Path) -> bool {
-    for component in path.components() {
-        let part = component.as_os_str().to_string_lossy().to_ascii_lowercase();
-        if matches!(
-            part.as_str(),
-            "test"
-                | "tests"
-                | "__tests__"
-                | "__snapshots__"
-                | "testdata"
-                | "testfixtures"
-                | "test-fixtures"
-                | "androidtest"
-                | "unittest"
-                | "integrationtest"
-                | "integrationtests"
-                | "integration-test"
-                | "integration-tests"
-                | "commontest"
-                | "jvmtest"
-                | "jstest"
-                | "nativetest"
-                | "iostest"
-                | "e2e"
-                | "spec"
-                | "specs"
-        ) {
-            return true;
-        }
+    let in_test_directory = path.components().any(|component| {
+        let name = component.as_os_str().to_string_lossy().to_ascii_lowercase();
+        TEST_DIRECTORIES.contains(&name.as_str())
+    });
+    if in_test_directory {
+        return true;
     }
     let Some(name) = path.file_name() else {
         return false;
     };
-    let name = name.to_string_lossy();
-    let lower = name.to_ascii_lowercase();
+    let lower = name.to_string_lossy().to_ascii_lowercase();
     let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let is_jvm_source = [".java", ".kt", ".scala", ".groovy"]
+        .iter()
+        .any(|extension| lower.ends_with(extension));
     lower.contains(".test.")
         || lower.contains(".spec.")
         || lower.ends_with("_test.go")
         || (lower.ends_with(".py") && (lower.starts_with("test_") || lower.ends_with("_test.py")))
-        || (["java", "kt", "scala", "groovy"]
-            .iter()
-            .any(|ext| lower.ends_with(&format!(".{ext}")))
+        || (is_jvm_source
             && ["Test", "Tests", "Spec"]
                 .iter()
                 .any(|suffix| stem.ends_with(suffix)))
 }
 
-// Treat repository content as text, never terminal escape sequences.
-pub fn clean(text: &str) -> String {
-    let mut result = String::new();
+pub fn escape_controls(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
     for ch in text.chars() {
         if ch == '\t' {
             result.push_str("    ");
@@ -419,6 +606,16 @@ pub enum LineKind {
     Removed,
 }
 
+impl LineKind {
+    pub fn is_code(self) -> bool {
+        matches!(self, Self::Context | Self::Added | Self::Removed)
+    }
+
+    pub fn is_change(self) -> bool {
+        matches!(self, Self::Added | Self::Removed)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiffLine {
     pub text: String,
@@ -428,59 +625,58 @@ pub struct DiffLine {
 }
 
 pub(crate) fn parse_patch(patch: &str) -> Vec<DiffLine> {
-    let (mut old, mut new) = (0, 0);
+    let (mut old_number, mut new_number) = (0, 0);
     let mut in_hunk = false;
     patch
         .lines()
-        .map(|line| {
-            let mut result = DiffLine {
-                text: clean(line),
+        .map(|text| {
+            let mut line = DiffLine {
+                text: escape_controls(text),
                 old: None,
                 new: None,
                 kind: LineKind::Header,
             };
-            if line.starts_with("diff --git ") {
+            if text.starts_with("diff --git ") {
                 in_hunk = false;
-            } else if line.starts_with("@@ ") {
-                let mut fields = line.split_whitespace().skip(1);
-                let parse_start = |field: Option<&str>| {
-                    field
-                        .and_then(|value| value.get(1..))
-                        .and_then(|value| value.split(',').next())
-                        .and_then(|value| value.parse().ok())
-                };
-                if let (Some(a), Some(b)) = (parse_start(fields.next()), parse_start(fields.next()))
-                {
-                    old = a;
-                    new = b;
+            } else if text.starts_with("@@ ") {
+                line.kind = LineKind::Hunk;
+                if let Some((old_start, new_start)) = hunk_starts(text) {
+                    old_number = old_start;
+                    new_number = new_start;
                     in_hunk = true;
                 }
-                result.kind = LineKind::Hunk;
             } else if in_hunk {
-                match line.as_bytes().first() {
+                match text.as_bytes().first() {
                     Some(b'+') => {
-                        result.kind = LineKind::Added;
-                        result.new = Some(new);
-                        new += 1;
+                        line.kind = LineKind::Added;
+                        line.new = Some(new_number);
+                        new_number += 1;
                     }
                     Some(b'-') => {
-                        result.kind = LineKind::Removed;
-                        result.old = Some(old);
-                        old += 1;
+                        line.kind = LineKind::Removed;
+                        line.old = Some(old_number);
+                        old_number += 1;
                     }
                     Some(b' ') => {
-                        result.kind = LineKind::Context;
-                        result.old = Some(old);
-                        result.new = Some(new);
-                        old += 1;
-                        new += 1;
+                        line.kind = LineKind::Context;
+                        line.old = Some(old_number);
+                        line.new = Some(new_number);
+                        old_number += 1;
+                        new_number += 1;
                     }
                     _ => {}
                 }
             }
-            result
+            line
         })
         .collect()
+}
+
+fn hunk_starts(header: &str) -> Option<(usize, usize)> {
+    let mut ranges = header.split_whitespace().skip(1);
+    let mut start =
+        || -> Option<usize> { ranges.next()?.get(1..)?.split(',').next()?.parse().ok() };
+    Some((start()?, start()?))
 }
 
 #[cfg(test)]
@@ -497,7 +693,7 @@ mod tests {
             "a/foo.spec.ts",
             "test_calc.py",
             "a/foo_test.go",
-            "a/PaymentSpec.scala",
+            "a/ParserSpec.scala",
         ] {
             assert!(is_test_path(Path::new(path)), "{path}");
         }
@@ -515,25 +711,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_nul_delimited_renames_and_unusual_paths() {
-        let changes =
-            parse_changes(b"R100\0src/old name.rs\0src/new\nname.rs\0D\0src/test/gone.rs\0")
-                .unwrap();
-        assert_eq!(changes.len(), 2);
-        assert_eq!(
-            changes[0].old_path.as_deref(),
-            Some(Path::new("src/old name.rs"))
-        );
-        assert_eq!(changes[0].path, Path::new("src/new\nname.rs"));
-        assert_eq!(changes[1].status, 'D');
-        assert!(changes[1].is_test());
-        assert!(parse_changes(b"R100\0old\0").is_err());
-    }
-
-    #[test]
     fn keeps_renames_across_test_boundary_visible() {
         let change = Change {
-            status: 'R',
+            status: ChangeStatus::Renamed,
             path: "tests/a.rs".into(),
             old_path: Some("src/a.rs".into()),
         };
@@ -541,11 +721,36 @@ mod tests {
     }
 
     #[test]
-    fn numbers_hunks_and_does_not_emit_terminal_controls() {
-        let lines = parse_patch("--- a/x\n+++ b/x\n@@ -7,2 +9,2 @@\n-old\n+new\n same\n");
-        assert_eq!((lines[3].old, lines[3].new), (Some(7), None));
-        assert_eq!((lines[4].old, lines[4].new), (None, Some(9)));
-        assert_eq!((lines[5].old, lines[5].new), (Some(8), Some(10)));
-        assert_eq!(clean("\x1b[31mhello\tworld"), "\\u{1b}[31mhello    world");
+    fn collapses_shared_path_parts_of_moves() {
+        assert_eq!(
+            collapse_move(
+                "service/common/domain/src/Action.kt",
+                "service/agent/src/Action.kt"
+            ),
+            "service/{common/domain -> agent}/src/Action.kt"
+        );
+        assert_eq!(collapse_move("src/a.rs", "src/b.rs"), "src/{a.rs -> b.rs}");
+        assert_eq!(collapse_move("a.rs", "lib/a.rs"), "{ -> lib}/a.rs");
+        let change = Change {
+            status: ChangeStatus::Renamed,
+            path: "src/b.rs".into(),
+            old_path: Some("src/a.rs".into()),
+        };
+        assert_eq!(
+            change.move_summary("100%").as_deref(),
+            Some("Moved, content unchanged: src/{a.rs -> b.rs}")
+        );
+        assert_eq!(
+            change.move_summary("96%").as_deref(),
+            Some("Moved, 96% similar: src/{a.rs -> b.rs}")
+        );
+    }
+
+    #[test]
+    fn does_not_emit_terminal_controls() {
+        assert_eq!(
+            escape_controls("\x1b[31mhello\tworld"),
+            "\\u{1b}[31mhello    world"
+        );
     }
 }

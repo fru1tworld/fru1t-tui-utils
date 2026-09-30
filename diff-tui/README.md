@@ -8,6 +8,8 @@ Files에서는 디렉터리 트리와 코드 미리보기를 함께 표시합니
 
 코드 패널에서는 `diff --git`, `index`, `---`, `+++` 파일 헤더를 숨깁니다. 변경 구간과 코드, 바이너리나 파일 권한 변경 요약은 표시합니다.
 
+변경 구간 제목에는 구문 강조기가 인식한 가까운 함수 선언을 함께 표시합니다.
+
 ## 설치와 실행
 
 utils 루트에서 설치합니다.
@@ -26,7 +28,7 @@ cp diff-tui/completions/_diff-tui ~/.oh-my-zsh/custom/completions/
 비교하려는 Git 저장소에서 실행합니다.
 
 ```sh
-diff-tui                    # HEAD와 현재 작업 폴더 비교, staged + unstaged
+diff-tui                    # HEAD와 현재 작업 폴더 비교, staged + unstaged + 미추적 파일
 diff-tui main               # main과 현재 HEAD의 커밋된 상태 비교
 diff-tui main feature       # 두 브랜치의 최종 상태 비교
 diff-tui --unified          # 통합 보기로 시작
@@ -43,7 +45,7 @@ cargo run -p diff-tui -- -C /path/to/repo
 cargo run -p diff-tui -- -C /path/to/repo main feature
 ```
 
-비교 중인 저장소에 checkout, fetch, stage 작업을 수행하지 않습니다. 원격 브랜치는 로컬에 있는 remote-tracking ref를 사용합니다. 현재 변경 모드는 Git이 추적하는 파일을 대상으로 하며, untracked 파일은 포함하지 않습니다.
+비교 중인 저장소에 checkout, fetch, stage 작업을 수행하지 않습니다. 원격 브랜치는 로컬에 있는 remote-tracking ref를 사용합니다. 현재 변경 모드는 미추적 파일도 `?` 상태로 표시하고, 내용을 새로 추가된 코드로 보여 줍니다. `.gitignore` 등 Git의 무시 규칙과 테스트 파일 숨김 규칙을 적용합니다. 미추적 파일의 생성·수정·삭제도 1초 간격의 자동 갱신에 반영합니다. `--unstaged`, `--staged`, 브랜치 비교에는 미추적 파일을 포함하지 않습니다.
 
 ## 키 조작
 
