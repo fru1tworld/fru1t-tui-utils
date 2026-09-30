@@ -68,12 +68,10 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> anyhow::Result<Option<S
             app.sync_external_changes()?;
             last_sync = Instant::now();
         }
-        terminal.draw(|frame| ui::ui(frame, app))?;
+        terminal.draw(|frame| ui::render(frame, app))?;
 
         let wait = sync_interval.saturating_sub(last_sync.elapsed());
         if !event::poll(wait)? {
-            app.sync_external_changes()?;
-            last_sync = Instant::now();
             continue;
         }
         let Event::Key(key) = event::read()? else {

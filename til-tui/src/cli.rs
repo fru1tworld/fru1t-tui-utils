@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use serde_json::json;
 
 use crate::db::SqliteTilRepository;
-use crate::domain::validate_content;
+use crate::domain::{EntryId, TilEntry};
 use crate::error::{Error, Result};
 use crate::output;
 
@@ -72,13 +72,7 @@ pub(crate) fn run(command: Command) -> anyhow::Result<()> {
             let date = parse_date(&date)?;
             let entries = repository.entries_on(date)?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json!({
-                        "date": date.to_string(),
-                        "entries": entries,
-                    }))?
-                );
+                print_day_as_json(date, &entries)?;
             } else {
                 for entry in entries {
                     println!("#{} {} {}", entry.id, entry.time_label(), entry.content);
@@ -86,34 +80,37 @@ pub(crate) fn run(command: Command) -> anyhow::Result<()> {
             }
         }
         Command::Add { text, date } => {
-            let entry = repository.create_on(parse_date(&date)?, validate_content(&text)?)?;
+            let entry = repository.create_on(parse_date(&date)?, &text)?;
             println!("{}", entry.id);
         }
         Command::Out { date, json } => {
             let date = parse_date(&date)?;
             let entries = repository.entries_on(date)?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json!({
-                        "date": date.to_string(),
-                        "entries": entries,
-                    }))?
-                );
+                print_day_as_json(date, &entries)?;
             } else {
                 print!("{}", output::format_day_as_markdown(date, &entries));
             }
         }
         Command::Edit { id, text } => {
-            repository.update_content(id, validate_content(&text)?)?;
+            repository.update_content(EntryId(id), &text)?;
         }
         Command::Move { id, date } => {
-            repository.move_to_date(id, parse_date(&date)?)?;
+            repository.move_to_date(EntryId(id), parse_date(&date)?)?;
         }
         Command::Delete { id } => {
-            repository.delete(id)?;
+            repository.delete(EntryId(id))?;
         }
     }
+    Ok(())
+}
+
+fn print_day_as_json(date: NaiveDate, entries: &[TilEntry]) -> serde_json::Result<()> {
+    let day = json!({
+        "date": date.to_string(),
+        "entries": entries,
+    });
+    println!("{}", serde_json::to_string_pretty(&day)?);
     Ok(())
 }
 

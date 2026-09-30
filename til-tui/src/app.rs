@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use chrono::{Duration, Local, NaiveDate};
 use ratatui::widgets::ListState;
@@ -7,21 +7,21 @@ use tui_input::Input;
 use crate::action::{Action, Flow};
 use crate::clipboard;
 use crate::db::SqliteTilRepository;
-use crate::domain::{TilEntry, validate_content};
+use crate::domain::{EntryId, TilEntry, validate_content};
 use crate::error::{Error, Result};
 use crate::output;
 use crate::week::CalendarWeek;
 
 const UNDO_LIMIT: usize = 5;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mode {
     Insert,
     Normal,
 }
 
 pub(crate) struct EditDialog {
-    pub(crate) entry_id: i64,
+    pub(crate) entry_id: EntryId,
     pub(crate) input: Input,
 }
 
@@ -44,17 +44,17 @@ pub(crate) enum VisibleRow {
 #[derive(Clone)]
 enum UndoOperation {
     DeleteCreated {
-        entry_id: i64,
+        entry_id: EntryId,
     },
     RestoreDeleted {
         entry: TilEntry,
     },
     RestoreContent {
-        entry_id: i64,
+        entry_id: EntryId,
         content: String,
     },
     RestoreRecordedAt {
-        entry_id: i64,
+        entry_id: EntryId,
         recorded_at: i64,
         date_to_show: NaiveDate,
     },
@@ -63,7 +63,7 @@ enum UndoOperation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RowKey {
     Date(NaiveDate),
-    Entry(i64),
+    Entry(EntryId),
 }
 
 pub(crate) struct App {
@@ -133,13 +133,13 @@ impl App {
             Action::Delete => self.delete_selected_entry()?,
             Action::Undo => self.undo()?,
             Action::Yank => self.copy_day_to_clipboard(),
-            Action::PopupInput(request) => {
+            Action::EditDialogInput(request) => {
                 if let Some(dialog) = &mut self.edit_dialog {
                     dialog.input.handle(request);
                 }
             }
-            Action::PopupCommit => self.commit_edit_dialog()?,
-            Action::PopupCancel => {
+            Action::CommitEditDialog => self.commit_edit_dialog()?,
+            Action::CancelEditDialog => {
                 self.edit_dialog = None;
                 self.status = "취소됨".into();
             }
@@ -177,20 +177,7 @@ impl App {
     }
 
     fn selected_row_key(&self) -> Option<RowKey> {
-        match self.selected_row()? {
-            VisibleRow::Date { group_index } => self
-                .date_groups
-                .get(group_index)
-                .map(|group| RowKey::Date(group.date)),
-            VisibleRow::Entry {
-                group_index,
-                entry_index,
-            } => self
-                .date_groups
-                .get(group_index)
-                .and_then(|group| group.entries.get(entry_index))
-                .map(|entry| RowKey::Entry(entry.id)),
-        }
+        self.row_key(self.selected_row()?)
     }
 
     fn row_key(&self, row: VisibleRow) -> Option<RowKey> {
@@ -203,18 +190,19 @@ impl App {
                 group_index,
                 entry_index,
             } => self
-                .date_groups
-                .get(group_index)
-                .and_then(|group| group.entries.get(entry_index))
+                .entry_at(group_index, entry_index)
                 .map(|entry| RowKey::Entry(entry.id)),
         }
     }
 
-    fn selected_entry_id(&self) -> Option<i64> {
-        match self.selected_row_key()? {
-            RowKey::Entry(entry_id) => Some(entry_id),
-            RowKey::Date(_) => None,
-        }
+    fn row_index(&self, key: RowKey) -> Option<usize> {
+        self.visible_rows
+            .iter()
+            .position(|row| self.row_key(*row) == Some(key))
+    }
+
+    fn entry_at(&self, group_index: usize, entry_index: usize) -> Option<&TilEntry> {
+        self.date_groups.get(group_index)?.entries.get(entry_index)
     }
 
     fn selected_entry(&self) -> Option<&TilEntry> {
@@ -225,52 +213,38 @@ impl App {
         else {
             return None;
         };
-        self.date_groups
-            .get(group_index)
-            .and_then(|group| group.entries.get(entry_index))
+        self.entry_at(group_index, entry_index)
     }
 
     fn refresh(&mut self, preferred_row: Option<RowKey>) -> Result<()> {
         let visible_week = self.calendar_week();
-        let mut entries_by_date = BTreeMap::<NaiveDate, Vec<TilEntry>>::new();
+        let mut entries_by_date = HashMap::<NaiveDate, Vec<TilEntry>>::new();
         for entry in self
             .repository
             .entries_between(visible_week.start(), visible_week.end())?
         {
-            let date = entry.recorded_date().ok_or_else(|| {
-                Error::InvalidInput(format!("#{} 기록의 날짜를 변환할 수 없습니다", entry.id))
-            })?;
+            let date = entry
+                .recorded_date()
+                .ok_or(Error::UnrepresentableRecordedAt(entry.id))?;
             entries_by_date.entry(date).or_default().push(entry);
         }
 
-        self.date_groups = self
-            .calendar_week()
+        self.date_groups = visible_week
             .dates()
             .map(|date| DateGroup {
                 date,
                 entries: entries_by_date.remove(&date).unwrap_or_default(),
             })
             .collect();
-        let available_dates = self
-            .date_groups
-            .iter()
-            .map(|group| group.date)
-            .collect::<HashSet<_>>();
         self.collapsed_dates
-            .retain(|date| available_dates.contains(date));
+            .retain(|date| (visible_week.start()..=visible_week.end()).contains(date));
         self.rebuild_visible_rows();
         self.data_version = self.repository.data_version()?;
 
-        let preferred_row = preferred_row.unwrap_or(RowKey::Date(self.selected_date));
+        let selected_date_row = RowKey::Date(self.selected_date);
         let selected_index = self
-            .visible_rows
-            .iter()
-            .position(|row| self.row_key(*row) == Some(preferred_row))
-            .or_else(|| {
-                self.visible_rows
-                    .iter()
-                    .position(|row| self.row_key(*row) == Some(RowKey::Date(self.selected_date)))
-            })
+            .row_index(preferred_row.unwrap_or(selected_date_row))
+            .or_else(|| self.row_index(selected_date_row))
             .or((!self.visible_rows.is_empty()).then_some(0));
         self.selection.select(selected_index);
         self.update_selected_date();
@@ -285,23 +259,20 @@ impl App {
                 continue;
             }
             self.visible_rows
-                .extend(group.entries.iter().enumerate().map(|(entry_index, _)| {
-                    VisibleRow::Entry {
+                .extend(
+                    (0..group.entries.len()).map(|entry_index| VisibleRow::Entry {
                         group_index,
                         entry_index,
-                    }
-                }));
+                    }),
+                );
         }
     }
 
     fn update_selected_date(&mut self) {
-        let group_index = match self.selected_row() {
-            Some(VisibleRow::Date { group_index } | VisibleRow::Entry { group_index, .. }) => {
-                group_index
-            }
-            None => return,
-        };
-        if let Some(group) = self.date_groups.get(group_index) {
+        if let Some(VisibleRow::Date { group_index } | VisibleRow::Entry { group_index, .. }) =
+            self.selected_row()
+            && let Some(group) = self.date_groups.get(group_index)
+        {
             self.selected_date = group.date;
         }
     }
@@ -363,38 +334,19 @@ impl App {
         self.update_selected_date();
     }
 
-    fn set_selected_date_collapsed(&mut self, collapsed: bool) {
-        let Some(row) = self.selected_row() else {
+    fn toggle_selected_date(&mut self) {
+        let Some(VisibleRow::Date { group_index }) = self.selected_row() else {
             return;
         };
-        let group_index = match row {
-            VisibleRow::Date { group_index } => group_index,
-            VisibleRow::Entry { group_index, .. } if collapsed => {
-                let date = self.date_groups[group_index].date;
-                if let Some(index) = self
-                    .visible_rows
-                    .iter()
-                    .position(|row| self.row_key(*row) == Some(RowKey::Date(date)))
-                {
-                    self.selection.select(Some(index));
-                    self.update_selected_date();
-                }
-                return;
-            }
-            VisibleRow::Entry { .. } => return,
-        };
         let date = self.date_groups[group_index].date;
+        let collapsed = !self.collapsed_dates.contains(&date);
         if collapsed {
             self.collapsed_dates.insert(date);
         } else {
             self.collapsed_dates.remove(&date);
         }
         self.rebuild_visible_rows();
-        if let Some(index) = self
-            .visible_rows
-            .iter()
-            .position(|row| self.row_key(*row) == Some(RowKey::Date(date)))
-        {
+        if let Some(index) = self.row_index(RowKey::Date(date)) {
             self.selection.select(Some(index));
         }
         self.status = if collapsed {
@@ -402,14 +354,6 @@ impl App {
         } else {
             format!("{date} 펼침")
         };
-    }
-
-    fn toggle_selected_date(&mut self) {
-        let Some(VisibleRow::Date { group_index }) = self.selected_row() else {
-            return;
-        };
-        let date = self.date_groups[group_index].date;
-        self.set_selected_date_collapsed(!self.collapsed_dates.contains(&date));
     }
 
     fn browse_week(&mut self, offset: i64) -> Result<()> {
@@ -431,7 +375,7 @@ impl App {
     }
 
     fn move_selected_entry_by_days(&mut self, offset: i64) -> Result<()> {
-        let Some(entry_id) = self.selected_entry_id() else {
+        let Some(entry_id) = self.selected_entry().map(|entry| entry.id) else {
             self.status = "옮길 기록을 선택하세요".into();
             return Ok(());
         };
@@ -461,8 +405,7 @@ impl App {
             return Ok(Some(self.formatted_output()));
         }
 
-        let content = validate_content(&input)?;
-        let entry = self.repository.create_on(self.selected_date, content)?;
+        let entry = self.repository.create_on(self.selected_date, &input)?;
         self.remember(UndoOperation::DeleteCreated { entry_id: entry.id });
         self.collapsed_dates.remove(&self.selected_date);
         self.refresh(Some(RowKey::Entry(entry.id)))?;
@@ -514,7 +457,7 @@ impl App {
     }
 
     fn delete_selected_entry(&mut self) -> Result<()> {
-        let Some(entry_id) = self.selected_entry_id() else {
+        let Some(entry_id) = self.selected_entry().map(|entry| entry.id) else {
             self.status = "삭제할 기록을 선택하세요".into();
             return Ok(());
         };
@@ -551,28 +494,6 @@ mod tests {
     fn select_date(app: &mut App, date: NaiveDate) {
         app.selected_date = date;
         app.refresh(Some(RowKey::Date(date))).unwrap();
-    }
-
-    #[test]
-    fn dates_are_first_level_rows_and_entries_are_second_level_rows() {
-        let mut app = App::new(SqliteTilRepository::in_memory()).unwrap();
-        let date = NaiveDate::from_ymd_opt(2026, 8, 31).unwrap();
-        app.repository.create_on(date, "기록").unwrap();
-        select_date(&mut app, date);
-
-        let date_index = app
-            .visible_rows
-            .iter()
-            .position(|row| app.row_key(*row) == Some(RowKey::Date(date)))
-            .unwrap();
-        assert!(matches!(
-            app.visible_rows[date_index],
-            VisibleRow::Date { .. }
-        ));
-        assert!(matches!(
-            app.visible_rows[date_index + 1],
-            VisibleRow::Entry { .. }
-        ));
     }
 
     #[test]

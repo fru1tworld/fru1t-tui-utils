@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::domain::EntryId;
+
 pub(crate) type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug, Error)]
@@ -11,5 +13,7 @@ pub(crate) enum Error {
     #[error("{0}")]
     InvalidInput(String),
     #[error("#{0} TIL 기록을 찾을 수 없습니다")]
-    EntryNotFound(i64),
+    EntryNotFound(EntryId),
+    #[error("#{0} 기록의 날짜를 변환할 수 없습니다")]
+    UnrepresentableRecordedAt(EntryId),
 }

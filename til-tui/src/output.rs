@@ -13,7 +13,9 @@ pub(crate) fn format_day_as_markdown(date: NaiveDate, entries: &[TilEntry]) -> S
         let mut lines = entry.content.lines();
         let first = lines.next().unwrap_or("");
         let first = first.strip_prefix("- ").unwrap_or(first);
-        out.push_str(&format!("  - {first}\n"));
+        out.push_str("  - ");
+        out.push_str(first);
+        out.push('\n');
         for line in lines {
             out.push_str("    ");
             out.push_str(line.trim_end_matches('\r'));
@@ -26,18 +28,19 @@ pub(crate) fn format_day_as_markdown(date: NaiveDate, entries: &[TilEntry]) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::EntryId;
 
     #[test]
     fn day_is_formatted_as_a_nested_markdown_list() {
         let date = NaiveDate::from_ymd_opt(2026, 8, 31).unwrap();
         let entries = vec![
             TilEntry {
-                id: 1,
+                id: EntryId(1),
                 content: "첫 줄".into(),
                 recorded_at: 0,
             },
             TilEntry {
-                id: 2,
+                id: EntryId(2),
                 content: "둘째 기록\n세부 내용\n- 확인할 점".into(),
                 recorded_at: 60,
             },

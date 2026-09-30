@@ -12,7 +12,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::{App, Mode, VisibleRow};
 use crate::domain::TilEntry;
 
-pub(crate) fn ui(frame: &mut Frame, app: &mut App) {
+pub(crate) fn render(frame: &mut Frame, app: &mut App) {
     let [top, middle, bottom] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(2),
@@ -24,7 +24,7 @@ pub(crate) fn ui(frame: &mut Frame, app: &mut App) {
     frame.render_stateful_widget(entry_list(app, middle.width), middle, &mut app.selection);
     frame.render_widget(bottom_panel(app, bottom), bottom);
 
-    let editing = if let Some(dialog) = &app.edit_dialog {
+    let focused_input = if let Some(dialog) = &app.edit_dialog {
         let area = centered_rect(70, 8, frame.area());
         frame.render_widget(Clear, area);
         frame.render_widget(
@@ -41,7 +41,7 @@ pub(crate) fn ui(frame: &mut Frame, app: &mut App) {
     } else {
         None
     };
-    if let Some((area, input)) = editing {
+    if let Some((area, input)) = focused_input {
         frame.set_cursor_position(input_cursor(area, input));
     }
 }
@@ -138,35 +138,28 @@ fn entry_item(entry: &TilEntry, width: usize, is_last: bool) -> ListItem<'static
     let branch = if is_last { "└" } else { "├" };
     let prefix = format!("  {branch}─ {}  ", entry.time_label());
     let prefix_width = prefix.width();
+    let continuation = " ".repeat(prefix_width);
     let available = width.saturating_sub(prefix_width).max(8);
-    let mut lines = Vec::new();
 
-    for source_line in entry.content.split('\n') {
+    let chunks = entry.content.split('\n').flat_map(|source_line| {
         let chunks = textwrap::wrap(source_line.trim_end_matches('\r'), available);
         if chunks.is_empty() {
-            lines.push(Line::from(vec![
-                if lines.is_empty() {
-                    prefix.clone()
-                } else {
-                    " ".repeat(prefix_width)
-                }
-                .dim(),
-                Span::raw(""),
-            ]));
-            continue;
+            vec![String::new()]
+        } else {
+            chunks.into_iter().map(|chunk| chunk.into_owned()).collect()
         }
-        for chunk in chunks {
-            let line_prefix = if lines.is_empty() {
+    });
+    let lines = chunks
+        .enumerate()
+        .map(|(index, chunk)| {
+            let line_prefix = if index == 0 {
                 prefix.clone()
             } else {
-                " ".repeat(prefix_width)
+                continuation.clone()
             };
-            lines.push(Line::from(vec![
-                line_prefix.dim(),
-                Span::raw(chunk.into_owned()),
-            ]));
-        }
-    }
+            Line::from(vec![line_prefix.dim(), Span::raw(chunk)])
+        })
+        .collect::<Vec<_>>();
     ListItem::new(lines)
 }
 

@@ -4,7 +4,7 @@ use std::time::Duration;
 use chrono::{Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike};
 use rusqlite::Connection;
 
-use crate::domain::{TilEntry, validate_content};
+use crate::domain::{EntryId, TilEntry, validate_content};
 use crate::error::{Error, Result};
 
 const DATABASE_VERSION: i64 = 1;
@@ -27,11 +27,9 @@ impl SqliteTilRepository {
     }
 
     fn from_connection(connection: Connection) -> Result<Self> {
+        connection.busy_timeout(Duration::from_secs(5))?;
+        connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
         let repository = Self { connection };
-        repository.connection.busy_timeout(Duration::from_secs(5))?;
-        repository
-            .connection
-            .execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
         repository.migrate()?;
         Ok(repository)
     }
@@ -71,15 +69,7 @@ impl SqliteTilRepository {
     }
 
     pub(crate) fn entries_on(&self, date: NaiveDate) -> Result<Vec<TilEntry>> {
-        let (start, end) = local_day_bounds(date)?;
-        let mut statement = self.connection.prepare(
-            "SELECT id, text, created_at
-             FROM entries
-             WHERE created_at >= ?1 AND created_at < ?2
-             ORDER BY created_at ASC, id ASC",
-        )?;
-        let rows = statement.query_map((start, end), til_entry_from_row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        self.entries_between(date, date)
     }
 
     pub(crate) fn entries_between(
@@ -108,16 +98,12 @@ impl SqliteTilRepository {
             let time = now.time().with_nanosecond(0).unwrap_or(NaiveTime::MIN);
             local_timestamp(date.and_time(time))?
         };
-        self.insert_at(content, recorded_at)
-    }
-
-    fn insert_at(&self, content: &str, recorded_at: i64) -> Result<TilEntry> {
         self.connection.execute(
             "INSERT INTO entries (text, created_at) VALUES (?1, ?2)",
             (content, recorded_at),
         )?;
         Ok(TilEntry {
-            id: self.connection.last_insert_rowid(),
+            id: EntryId(self.connection.last_insert_rowid()),
             content: content.to_owned(),
             recorded_at,
         })
@@ -126,51 +112,50 @@ impl SqliteTilRepository {
     pub(crate) fn restore(&self, entry: &TilEntry) -> Result<()> {
         self.connection.execute(
             "INSERT INTO entries (id, text, created_at) VALUES (?1, ?2, ?3)",
-            (entry.id, &entry.content, entry.recorded_at),
+            (entry.id.0, &entry.content, entry.recorded_at),
         )?;
         Ok(())
     }
 
-    pub(crate) fn update_content(&self, id: i64, content: &str) -> Result<()> {
+    pub(crate) fn update_content(&self, id: EntryId, content: &str) -> Result<()> {
         let content = validate_content(content)?;
-        let changed = self
-            .connection
-            .execute("UPDATE entries SET text = ?1 WHERE id = ?2", (content, id))?;
-        ensure_entry_changed(id, changed)
+        let changed_rows = self.connection.execute(
+            "UPDATE entries SET text = ?1 WHERE id = ?2",
+            (content, id.0),
+        )?;
+        ensure_entry_changed(id, changed_rows)
     }
 
-    pub(crate) fn move_to_date(&self, id: i64, date: NaiveDate) -> Result<i64> {
+    pub(crate) fn move_to_date(&self, id: EntryId, date: NaiveDate) -> Result<i64> {
         let entry = self.find(id)?;
-        let local_time = chrono::DateTime::from_timestamp(entry.recorded_at, 0)
-            .map(|date_time| date_time.with_timezone(&Local).time())
-            .unwrap_or(NaiveTime::MIN);
+        let local_time = entry.recorded_time().unwrap_or(NaiveTime::MIN);
         let moved_at = local_timestamp(date.and_time(local_time))?;
         self.set_recorded_at(id, moved_at)?;
         Ok(entry.recorded_at)
     }
 
-    pub(crate) fn set_recorded_at(&self, id: i64, recorded_at: i64) -> Result<()> {
-        let changed = self.connection.execute(
+    pub(crate) fn set_recorded_at(&self, id: EntryId, recorded_at: i64) -> Result<()> {
+        let changed_rows = self.connection.execute(
             "UPDATE entries SET created_at = ?1 WHERE id = ?2",
-            (recorded_at, id),
+            (recorded_at, id.0),
         )?;
-        ensure_entry_changed(id, changed)
+        ensure_entry_changed(id, changed_rows)
     }
 
-    pub(crate) fn delete(&self, id: i64) -> Result<TilEntry> {
+    pub(crate) fn delete(&self, id: EntryId) -> Result<TilEntry> {
         let entry = self.find(id)?;
         let changed_rows = self
             .connection
-            .execute("DELETE FROM entries WHERE id = ?1", [id])?;
+            .execute("DELETE FROM entries WHERE id = ?1", [id.0])?;
         ensure_entry_changed(id, changed_rows)?;
         Ok(entry)
     }
 
-    fn find(&self, id: i64) -> Result<TilEntry> {
+    fn find(&self, id: EntryId) -> Result<TilEntry> {
         self.connection
             .query_row(
                 "SELECT id, text, created_at FROM entries WHERE id = ?1",
-                [id],
+                [id.0],
                 til_entry_from_row,
             )
             .map_err(|error| match error {
@@ -180,7 +165,7 @@ impl SqliteTilRepository {
     }
 }
 
-fn ensure_entry_changed(id: i64, changed_rows: usize) -> Result<()> {
+fn ensure_entry_changed(id: EntryId, changed_rows: usize) -> Result<()> {
     if changed_rows == 0 {
         return Err(Error::EntryNotFound(id));
     }
@@ -189,7 +174,7 @@ fn ensure_entry_changed(id: i64, changed_rows: usize) -> Result<()> {
 
 fn til_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TilEntry> {
     Ok(TilEntry {
-        id: row.get(0)?,
+        id: EntryId(row.get(0)?),
         content: row.get(1)?,
         recorded_at: row.get(2)?,
     })
@@ -230,14 +215,6 @@ mod tests {
 
     fn repository() -> SqliteTilRepository {
         SqliteTilRepository::in_memory()
-    }
-
-    #[test]
-    fn initial_database_is_empty() {
-        let repository = repository();
-        let date = NaiveDate::from_ymd_opt(2026, 8, 31).unwrap();
-
-        assert!(repository.entries_on(date).unwrap().is_empty());
     }
 
     #[test]

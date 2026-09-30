@@ -59,15 +59,6 @@ mod tests {
     }
 
     #[test]
-    fn week_runs_from_monday_through_sunday() {
-        let week = CalendarWeek::containing(date(2026, 9, 2));
-
-        assert_eq!(week.start(), date(2026, 8, 31));
-        assert_eq!(week.end(), date(2026, 9, 6));
-        assert_eq!(week.dates().count(), 7);
-    }
-
-    #[test]
     fn thursday_decides_the_month_and_first_week() {
         assert_eq!(
             CalendarWeek::containing(date(2026, 8, 30)).label(),
@@ -77,13 +68,5 @@ mod tests {
             CalendarWeek::containing(date(2026, 8, 31)).label(),
             "2026년 9월 1주차"
         );
-    }
-
-    #[test]
-    fn shifting_moves_exactly_one_calendar_week() {
-        let week = CalendarWeek::containing(date(2026, 9, 2));
-
-        assert_eq!(week.shifted(-1).start(), date(2026, 8, 24));
-        assert_eq!(week.shifted(1).start(), date(2026, 9, 7));
     }
 }

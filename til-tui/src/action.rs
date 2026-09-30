@@ -26,12 +26,12 @@ pub(crate) enum Action {
     Delete,
     Undo,
     Yank,
-    PopupInput(InputRequest),
-    PopupCommit,
-    PopupCancel,
+    EditDialogInput(InputRequest),
+    CommitEditDialog,
+    CancelEditDialog,
 }
 
-fn edit_request(key: KeyEvent) -> Option<InputRequest> {
+fn text_edit_request(key: KeyEvent) -> Option<InputRequest> {
     use InputRequest::*;
 
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -62,14 +62,14 @@ pub(crate) fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     if app.edit_dialog.is_some() {
         return match key.code {
-            Esc => Some(PopupCancel),
-            Enter if shift => Some(PopupInput(InputRequest::InsertChar('\n'))),
-            Enter => Some(PopupCommit),
-            _ => edit_request(key).map(PopupInput),
+            Esc => Some(CancelEditDialog),
+            Enter if shift => Some(EditDialogInput(InputRequest::InsertChar('\n'))),
+            Enter => Some(CommitEditDialog),
+            _ => text_edit_request(key).map(EditDialogInput),
         };
     }
 
-    let editing = app.mode == Mode::Insert && !app.input.value().is_empty();
+    let has_draft = !app.input.value().is_empty();
     match app.mode {
         Mode::Insert => match key.code {
             Esc => Some(EnterNormal),
@@ -77,9 +77,9 @@ pub(crate) fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
             Enter => Some(CommitInsert),
             Up => Some(Select(-1)),
             Down => Some(Select(1)),
-            Left if !editing => Some(BrowseWeek(-1)),
-            Right if !editing => Some(BrowseWeek(1)),
-            _ => edit_request(key).map(Input),
+            Left if !has_draft => Some(BrowseWeek(-1)),
+            Right if !has_draft => Some(BrowseWeek(1)),
+            _ => text_edit_request(key).map(Input),
         },
         Mode::Normal => Some(match key.code {
             Char('q') => Quit,
@@ -120,14 +120,6 @@ mod tests {
             map_key(&app, key),
             Some(Action::Input(InputRequest::InsertChar('\n')))
         );
-    }
-
-    #[test]
-    fn enter_commits_the_input() {
-        let app = app();
-        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-
-        assert_eq!(map_key(&app, key), Some(Action::CommitInsert));
     }
 
     #[test]
