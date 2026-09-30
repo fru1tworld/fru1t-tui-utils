@@ -1,37 +1,24 @@
-import { randomUUID } from "node:crypto";
-import {
-  closeSync,
-  existsSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-  writeSync,
-} from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { CommandError } from "./errors.js";
+import {
+  type Bookmark,
+  loadBookmarks,
+  type TpConfig,
+  updateBookmarks,
+} from "./store.js";
 
-export interface Bookmark {
-  readonly alias: string;
-  readonly path: string;
-  readonly createdAt: number;
-}
-
-export interface TpConfig {
-  readonly caseSensitive?: boolean;
-}
+export const CD_DIRECTIVE_PREFIX = "__TP_CD__:";
 
 export type ListOrder = "utf8" | "recent";
 
+export const SUPPORTED_SHELLS = ["bash", "zsh", "fish", "nu"] as const;
+export type Shell = (typeof SUPPORTED_SHELLS)[number];
+
 const ALIAS_COLUMN_WIDTH = 15;
-const BOOKMARK_LOCK_RETRY_COUNT = 40;
-const BOOKMARK_LOCK_RETRY_DELAY_MS = 25;
-const STALE_LOCK_AGE_MS = 10_000;
-const RESERVED_ALIASES = new Set([
+const RESERVED_ALIASES: ReadonlySet<string> = new Set([
   "add",
   "set",
   "del",
@@ -47,189 +34,24 @@ const RESERVED_ALIASES = new Set([
   "--completions",
 ]);
 
-export class CommandError extends Error {
-  override readonly name = "CommandError";
-}
+const USAGE = {
+  go: "Usage: tp <alias>",
+  add: "Usage: tp add <alias>",
+  set: "Usage: tp set <alias> <path> [<alias> <path> ...]",
+  del: "Usage: tp del <alias>",
+  ch: "Usage: tp ch <old_alias> <new_alias>",
+  list: "Usage: tp list [-u|--utf8] [-r|--recent]",
+  init: `Usage: tp-cli init <${SUPPORTED_SHELLS.join("|")}>`,
+} as const;
 
-export function getDataDir(): string {
-  return join(homedir(), ".tp");
-}
-
-export function getDataFile(dataDir?: string): string {
-  return join(dataDir ?? getDataDir(), "bookmarks.json");
-}
-
-export function getConfigFile(dataDir?: string): string {
-  return join(dataDir ?? getDataDir(), "config.json");
-}
-
-export function loadConfig(configFile: string): TpConfig {
-  if (!existsSync(configFile)) {
-    return {};
-  }
-
-  const raw = readFileSync(configFile, "utf-8");
-  try {
-    const value: unknown = JSON.parse(raw);
-    if (!isRecord(value) || !isOptionalBoolean(value.caseSensitive)) {
-      throw new CommandError(`Invalid config schema: ${configFile}`);
-    }
-    return { caseSensitive: value.caseSensitive };
-  } catch (error) {
-    if (error instanceof CommandError) {
-      throw error;
-    }
-    throw new CommandError(`Invalid JSON in config file: ${configFile}`);
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isOptionalBoolean(value: unknown): value is boolean | undefined {
-  return value === undefined || typeof value === "boolean";
-}
-
-function isBookmark(value: unknown): value is Bookmark {
-  return (
-    isRecord(value) &&
-    typeof value.alias === "string" &&
-    value.alias.length > 0 &&
-    typeof value.path === "string" &&
-    value.path.length > 0 &&
-    typeof value.createdAt === "number" &&
-    Number.isFinite(value.createdAt)
-  );
-}
-
-function parseBookmarks(raw: string, dataFile: string): Bookmark[] {
-  let value: unknown;
-  try {
-    value = JSON.parse(raw);
-  } catch {
-    throw new CommandError(`Invalid JSON in bookmarks file: ${dataFile}`);
-  }
-  if (!Array.isArray(value) || !value.every(isBookmark)) {
-    throw new CommandError(`Invalid bookmarks schema: ${dataFile}`);
-  }
-  return value;
-}
-
-export function init(dataFile: string): void {
-  mkdirSync(dirname(dataFile), { recursive: true });
-  if (!existsSync(dataFile)) {
-    saveBookmarks(dataFile, []);
-  }
-}
-
-export function loadBookmarks(dataFile: string): Bookmark[] {
-  init(dataFile);
-  const raw = readFileSync(dataFile, "utf-8");
-  try {
-    return parseBookmarks(raw, dataFile);
-  } catch (error) {
-    if (
-      error instanceof CommandError &&
-      error.message.startsWith("Invalid bookmarks schema")
-    ) {
-      throw error;
-    }
-    throw new CommandError(`Invalid JSON in bookmarks file: ${dataFile}`);
-  }
-}
-
-export function saveBookmarks(
-  dataFile: string,
-  bookmarks: readonly Bookmark[],
-): void {
-  mkdirSync(dirname(dataFile), { recursive: true });
-  const temporaryFile = join(
-    dirname(dataFile),
-    `.${basename(dataFile)}.${process.pid}.${randomUUID()}.tmp`,
-  );
-  try {
-    writeFileSync(temporaryFile, JSON.stringify(bookmarks, null, 2), {
-      encoding: "utf-8",
-      flag: "wx",
-      mode: 0o600,
-    });
-    renameSync(temporaryFile, dataFile);
-  } finally {
-    rmSync(temporaryFile, { force: true });
-  }
-}
-
-interface BookmarkMutation<T> {
-  readonly bookmarks?: readonly Bookmark[];
-  readonly result: T;
-}
-
-function withBookmarkLock<T>(dataFile: string, operation: () => T): T {
-  mkdirSync(dirname(dataFile), { recursive: true });
-  const lockFile = `${dataFile}.lock`;
-  const waitBuffer = new Int32Array(new SharedArrayBuffer(4));
-  let lockDescriptor: number | undefined;
-
-  for (let attempt = 0; attempt < BOOKMARK_LOCK_RETRY_COUNT; attempt += 1) {
-    try {
-      lockDescriptor = openSync(lockFile, "wx", 0o600);
-      writeSync(lockDescriptor, String(process.pid));
-      break;
-    } catch (error) {
-      const code = isRecord(error) ? error.code : undefined;
-      if (code !== "EEXIST") {
-        throw error;
-      }
-      if (isStaleLock(lockFile)) {
-        rmSync(lockFile, { force: true });
-        continue;
-      }
-      Atomics.wait(waitBuffer, 0, 0, BOOKMARK_LOCK_RETRY_DELAY_MS);
-    }
-  }
-
-  if (lockDescriptor === undefined) {
-    throw new CommandError("Bookmarks are busy. Please retry.");
-  }
-
-  try {
-    return operation();
-  } finally {
-    closeSync(lockDescriptor);
-    rmSync(lockFile, { force: true });
-  }
-}
-
-function isStaleLock(lockFile: string): boolean {
-  try {
-    return Date.now() - statSync(lockFile).mtimeMs > STALE_LOCK_AGE_MS;
-  } catch (error) {
-    const code = isRecord(error) ? error.code : undefined;
-    if (code === "ENOENT") return false;
-    throw error;
-  }
-}
-
-function mutateBookmarks<T>(
-  dataFile: string,
-  mutation: (bookmarks: readonly Bookmark[]) => BookmarkMutation<T>,
-): T {
-  return withBookmarkLock(dataFile, () => {
-    const currentBookmarks = loadBookmarks(dataFile);
-    const change = mutation(currentBookmarks);
-    if (change.bookmarks !== undefined) {
-      saveBookmarks(dataFile, change.bookmarks);
-    }
-    return change.result;
-  });
-}
-
-function validateAlias(alias: string, usage: string): void {
+function validateAlias(
+  alias: string | undefined,
+  usage: string,
+): asserts alias is string {
   if (!alias) {
     throw new CommandError(usage);
   }
-  if (alias !== alias.trim() || /\s/u.test(alias)) {
+  if (/\s/u.test(alias)) {
     throw new CommandError("Aliases cannot contain whitespace.");
   }
   if (RESERVED_ALIASES.has(alias.toLowerCase()) || alias.startsWith("-")) {
@@ -237,28 +59,28 @@ function validateAlias(alias: string, usage: string): void {
   }
 }
 
-function aliasMatch(a: string, b: string, caseSensitive: boolean): boolean {
-  return caseSensitive ? a === b : a.toLowerCase() === b.toLowerCase();
+function aliasesEqual(a: string, b: string, config: TpConfig): boolean {
+  return config.caseSensitive ? a === b : a.toLowerCase() === b.toLowerCase();
+}
+
+function findAliasIndex(
+  bookmarks: readonly Bookmark[],
+  alias: string,
+  config: TpConfig,
+): number {
+  return bookmarks.findIndex((bookmark) =>
+    aliasesEqual(bookmark.alias, alias, config),
+  );
 }
 
 function findByAlias(
   bookmarks: readonly Bookmark[],
   alias: string,
-  caseSensitive: boolean,
+  config: TpConfig,
 ): Bookmark | undefined {
-  return bookmarks.find((b) => aliasMatch(b.alias, alias, caseSensitive));
-}
-
-function findIndexByAlias(
-  bookmarks: readonly Bookmark[],
-  alias: string,
-  caseSensitive: boolean,
-): number {
-  return bookmarks.findIndex((b) => aliasMatch(b.alias, alias, caseSensitive));
-}
-
-function isCaseSensitive(config: TpConfig): boolean {
-  return config.caseSensitive ?? false;
+  return bookmarks.find((bookmark) =>
+    aliasesEqual(bookmark.alias, alias, config),
+  );
 }
 
 export function displayPath(path: string, home: string = homedir()): string {
@@ -270,58 +92,107 @@ export function displayPath(path: string, home: string = homedir()): string {
 function formatBookmarks(bookmarks: readonly Bookmark[]): string {
   return bookmarks
     .map(
-      (b) =>
-        `  ${b.alias.padEnd(ALIAS_COLUMN_WIDTH)} -> ${displayPath(b.path)}`,
+      ({ alias, path }) =>
+        `  ${alias.padEnd(ALIAS_COLUMN_WIDTH)} -> ${displayPath(path)}`,
     )
     .join("\n");
 }
 
 export function add(
-  alias: string,
+  alias: string | undefined,
   cwd: string,
   dataFile: string,
   config: TpConfig = {},
 ): string {
-  validateAlias(alias, "Usage: tp add <alias>");
+  validateAlias(alias, USAGE.add);
 
-  return mutateBookmarks(dataFile, (bookmarks) => {
-    const aliasIndex = findIndexByAlias(
-      bookmarks,
-      alias,
-      isCaseSensitive(config),
-    );
-    const existingAlias = bookmarks[aliasIndex];
-    const existingPath = bookmarks.find(
+  return updateBookmarks(dataFile, (bookmarks) => {
+    const aliasIndex = findAliasIndex(bookmarks, alias, config);
+    const pathOwner = bookmarks.find(
       (bookmark, index) => index !== aliasIndex && bookmark.path === cwd,
     );
-
-    if (existingPath) {
+    if (pathOwner) {
       throw new CommandError(
-        `This path is already registered as '${existingPath.alias}'.`,
+        `This path is already registered as '${pathOwner.alias}'.`,
       );
     }
 
-    if (existingAlias) {
-      if (existingAlias.path === cwd) {
-        return {
-          result: `Already registered: ${existingAlias.alias} -> ${cwd}`,
-        };
-      }
-
+    const existing = bookmarks[aliasIndex];
+    if (!existing) {
       return {
-        bookmarks: [
-          { ...existingAlias, path: cwd, createdAt: Date.now() },
-          ...bookmarks.toSpliced(aliasIndex, 1),
+        nextBookmarks: [
+          { alias, path: cwd, createdAt: Date.now() },
+          ...bookmarks,
         ],
-        result: `Updated: '${existingAlias.alias}' ${existingAlias.path} -> ${cwd}`,
+        message: `Added: ${alias} -> ${cwd}`,
       };
     }
-
+    if (existing.path === cwd) {
+      return { message: `Already registered: ${existing.alias} -> ${cwd}` };
+    }
     return {
-      bookmarks: [{ alias, path: cwd, createdAt: Date.now() }, ...bookmarks],
-      result: `Added: ${alias} -> ${cwd}`,
+      nextBookmarks: [
+        { ...existing, path: cwd, createdAt: Date.now() },
+        ...bookmarks.toSpliced(aliasIndex, 1),
+      ],
+      message: `Updated: '${existing.alias}' ${existing.path} -> ${cwd}`,
     };
   });
+}
+
+interface AliasPath {
+  readonly alias: string;
+  readonly path: string;
+}
+
+function parseAliasPathPairs(
+  args: readonly string[],
+  cwd: string,
+): AliasPath[] {
+  if (args.length === 0 || args.length % 2 !== 0) {
+    throw new CommandError(USAGE.set);
+  }
+
+  const pairs: AliasPath[] = [];
+  for (let index = 0; index < args.length; index += 2) {
+    const alias = args[index];
+    validateAlias(alias, USAGE.set);
+    const path = resolve(cwd, args[index + 1]);
+    if (!statSync(path, { throwIfNoEntry: false })?.isDirectory()) {
+      throw new CommandError(`Directory does not exist: ${path}`);
+    }
+    pairs.push({ alias, path });
+  }
+  return pairs;
+}
+
+function assertUniqueAliases(
+  pairs: readonly AliasPath[],
+  config: TpConfig,
+): void {
+  const repeated = pairs.find((pair, index) =>
+    pairs
+      .slice(index + 1)
+      .some((other) => aliasesEqual(pair.alias, other.alias, config)),
+  );
+  if (repeated) {
+    throw new CommandError(
+      `Alias '${repeated.alias}' is specified more than once.`,
+    );
+  }
+}
+
+function assertUniquePaths(bookmarks: readonly Bookmark[]): void {
+  for (const [index, bookmark] of bookmarks.entries()) {
+    const duplicate = bookmarks
+      .slice(index + 1)
+      .find((other) => other.path === bookmark.path);
+    if (duplicate) {
+      throw new CommandError(
+        `Path '${bookmark.path}' is assigned to both '${bookmark.alias}' and '${duplicate.alias}'.`,
+      );
+    }
+  }
 }
 
 export function set(
@@ -330,189 +201,132 @@ export function set(
   dataFile: string,
   config: TpConfig = {},
 ): string {
-  if (args.length === 0 || args.length % 2 !== 0) {
-    throw new CommandError("Usage: tp set <alias> <path> [<alias> <path> ...]");
-  }
+  const pairs = parseAliasPathPairs(args, cwd);
+  assertUniqueAliases(pairs, config);
 
-  const caseSensitive = isCaseSensitive(config);
-  const entries = Array.from({ length: args.length / 2 }, (_, index) => {
-    const alias = args[index * 2];
-    const path = resolve(cwd, args[index * 2 + 1]);
-
-    validateAlias(alias, "Usage: tp set <alias> <path> [<alias> <path> ...]");
-
-    if (!existsSync(path) || !statSync(path).isDirectory()) {
-      throw new CommandError(`Directory does not exist: ${path}`);
-    }
-
-    return { alias, path };
-  });
-
-  for (const [index, entry] of entries.entries()) {
-    if (
-      entries
-        .slice(index + 1)
-        .some((other) => aliasMatch(entry.alias, other.alias, caseSensitive))
-    ) {
-      throw new CommandError(
-        `Alias '${entry.alias}' is specified more than once.`,
-      );
-    }
-  }
-
-  return mutateBookmarks(dataFile, (bookmarks) => {
+  return updateBookmarks(dataFile, (bookmarks) => {
+    const updatedAt = Date.now();
+    const setBookmarks = pairs.map(({ alias, path }) => ({
+      alias: findByAlias(bookmarks, alias, config)?.alias ?? alias,
+      path,
+      createdAt: updatedAt,
+    }));
     const untouchedBookmarks = bookmarks.filter(
       (bookmark) =>
-        !entries.some(({ alias }) =>
-          aliasMatch(bookmark.alias, alias, caseSensitive),
-        ),
+        !pairs.some(({ alias }) => aliasesEqual(bookmark.alias, alias, config)),
     );
-    const updatedAt = Date.now();
-    const updatedBookmarks = entries.map(({ alias, path }) => {
-      const existing = findByAlias(bookmarks, alias, caseSensitive);
-      return { alias: existing?.alias ?? alias, path, createdAt: updatedAt };
-    });
-    const nextBookmarks = [...updatedBookmarks, ...untouchedBookmarks];
+    const nextBookmarks = [...setBookmarks, ...untouchedBookmarks];
+    assertUniquePaths(nextBookmarks);
 
-    for (const [index, bookmark] of nextBookmarks.entries()) {
-      const duplicate = nextBookmarks
-        .slice(index + 1)
-        .find((other) => other.path === bookmark.path);
-      if (duplicate) {
-        throw new CommandError(
-          `Path '${bookmark.path}' is assigned to both '${bookmark.alias}' and '${duplicate.alias}'.`,
-        );
-      }
-    }
-
-    const noun = entries.length === 1 ? "bookmark" : "bookmarks";
+    const noun = pairs.length === 1 ? "bookmark" : "bookmarks";
     return {
-      bookmarks: nextBookmarks,
-      result: `Set ${entries.length} ${noun}:\n\n${formatBookmarks(updatedBookmarks)}`,
+      nextBookmarks,
+      message: `Set ${pairs.length} ${noun}:\n\n${formatBookmarks(setBookmarks)}`,
     };
   });
 }
 
 export function del(
-  alias: string,
+  alias: string | undefined,
   dataFile: string,
   config: TpConfig = {},
 ): string {
-  if (!alias) throw new CommandError("Usage: tp del <alias>");
+  if (!alias) throw new CommandError(USAGE.del);
 
-  return mutateBookmarks(dataFile, (bookmarks) => {
-    const index = findIndexByAlias(bookmarks, alias, isCaseSensitive(config));
+  return updateBookmarks(dataFile, (bookmarks) => {
+    const index = findAliasIndex(bookmarks, alias, config);
     if (index === -1) {
       throw new CommandError(`Alias '${alias}' not found.`);
     }
     return {
-      bookmarks: bookmarks.toSpliced(index, 1),
-      result: `Deleted: ${alias}`,
+      nextBookmarks: bookmarks.toSpliced(index, 1),
+      message: `Deleted: ${alias}`,
     };
   });
 }
 
 export function gc(dataFile: string): string {
-  return mutateBookmarks(dataFile, (bookmarks) => {
-    const existingBookmarks: Bookmark[] = [];
-    const missingBookmarks: Bookmark[] = [];
-
-    for (const bookmark of bookmarks) {
-      (existsSync(bookmark.path) ? existingBookmarks : missingBookmarks).push(
-        bookmark,
-      );
-    }
-
-    if (missingBookmarks.length === 0) {
-      return { result: "No invalid bookmarks found. All directories exist." };
+  return updateBookmarks(dataFile, (bookmarks) => {
+    const missing = bookmarks.filter(({ path }) => !existsSync(path));
+    if (missing.length === 0) {
+      return { message: "No invalid bookmarks found. All directories exist." };
     }
 
     return {
-      bookmarks: existingBookmarks,
-      result: [
-        `Found ${missingBookmarks.length} invalid bookmark(s):\n`,
-        formatBookmarks(missingBookmarks),
-        `\nRemoved ${missingBookmarks.length} invalid bookmark(s).`,
+      nextBookmarks: bookmarks.filter(
+        (bookmark) => !missing.includes(bookmark),
+      ),
+      message: [
+        `Found ${missing.length} invalid bookmark(s):\n`,
+        formatBookmarks(missing),
+        `\nRemoved ${missing.length} invalid bookmark(s).`,
       ].join("\n"),
     };
   });
 }
 
 export function ch(
-  oldAlias: string,
-  newAlias: string,
+  oldAlias: string | undefined,
+  newAlias: string | undefined,
   dataFile: string,
   config: TpConfig = {},
 ): string {
-  if (!oldAlias || !newAlias)
-    throw new CommandError("Usage: tp ch <old_alias> <new_alias>");
-  validateAlias(newAlias, "Usage: tp ch <old_alias> <new_alias>");
-
-  const caseSensitive = isCaseSensitive(config);
-
-  if (aliasMatch(oldAlias, newAlias, caseSensitive)) {
+  if (!oldAlias) throw new CommandError(USAGE.ch);
+  validateAlias(newAlias, USAGE.ch);
+  if (aliasesEqual(oldAlias, newAlias, config)) {
     throw new CommandError("Old alias and new alias are the same.");
   }
 
-  return mutateBookmarks(dataFile, (bookmarks) => {
-    const index = findIndexByAlias(bookmarks, oldAlias, caseSensitive);
-    if (index === -1) {
+  return updateBookmarks(dataFile, (bookmarks) => {
+    const index = findAliasIndex(bookmarks, oldAlias, config);
+    const renamed = bookmarks[index];
+    if (!renamed) {
       throw new CommandError(`Alias '${oldAlias}' not found.`);
     }
 
-    const targetBookmark = bookmarks[index];
-    const existingNewAlias = findByAlias(bookmarks, newAlias, caseSensitive);
-    if (existingNewAlias) {
-      if (existingNewAlias.path !== targetBookmark.path) {
-        throw new CommandError(
-          `Alias '${newAlias}' already exists with a different path.`,
-        );
-      }
-
+    const collision = findByAlias(bookmarks, newAlias, config);
+    if (!collision) {
       return {
-        bookmarks: bookmarks.toSpliced(index, 1),
-        result: [
-          `'${oldAlias}' and '${newAlias}' point to the same directory: ${existingNewAlias.path}`,
-          `Removed duplicate alias '${oldAlias}'. Keeping '${newAlias}'.`,
-        ].join("\n"),
+        nextBookmarks: bookmarks.with(index, { ...renamed, alias: newAlias }),
+        message: `Renamed: '${oldAlias}' -> '${newAlias}'`,
       };
     }
-
+    if (collision.path !== renamed.path) {
+      throw new CommandError(
+        `Alias '${newAlias}' already exists with a different path.`,
+      );
+    }
     return {
-      bookmarks: bookmarks.with(index, {
-        ...targetBookmark,
-        alias: newAlias,
-      }),
-      result: `Renamed: '${oldAlias}' -> '${newAlias}'`,
+      nextBookmarks: bookmarks.toSpliced(index, 1),
+      message: [
+        `'${oldAlias}' and '${newAlias}' point to the same directory: ${collision.path}`,
+        `Removed duplicate alias '${oldAlias}'. Keeping '${newAlias}'.`,
+      ].join("\n"),
     };
   });
 }
 
 export function go(
-  alias: string,
+  alias: string | undefined,
   dataFile: string,
   config: TpConfig = {},
 ): string {
   if (!alias) {
-    throw new CommandError("Usage: tp <alias>");
+    throw new CommandError(USAGE.go);
   }
 
-  const bookmarks = loadBookmarks(dataFile);
-  const bookmark = findByAlias(bookmarks, alias, isCaseSensitive(config));
-
+  const bookmark = findByAlias(loadBookmarks(dataFile), alias, config);
   if (!bookmark) {
     throw new CommandError(`Alias '${alias}' not found.`);
   }
-
   if (!existsSync(bookmark.path)) {
     throw new CommandError(`Directory no longer exists: ${bookmark.path}`);
   }
-
-  return `__TP_CD__:${bookmark.path}`;
+  return `${CD_DIRECTIVE_PREFIX}${bookmark.path}`;
 }
 
-export function parseListOrder(arg?: string): ListOrder {
-  switch (arg) {
+export function parseListOrder(flag: string | undefined): ListOrder {
+  switch (flag) {
     case undefined:
     case "-u":
     case "--utf8":
@@ -521,23 +335,23 @@ export function parseListOrder(arg?: string): ListOrder {
     case "--recent":
       return "recent";
     default:
-      throw new CommandError("Usage: tp list [-u|--utf8] [-r|--recent]");
+      throw new CommandError(USAGE.list);
   }
 }
 
 function compareUtf8(a: string, b: string): number {
-  return Buffer.from(a, "utf-8").compare(Buffer.from(b, "utf-8"));
+  return Buffer.compare(Buffer.from(a, "utf-8"), Buffer.from(b, "utf-8"));
 }
 
-const LIST_ORDERS = {
+const LIST_ORDER_VIEWS = {
   utf8: {
     header: "UTF-8 order",
-    sort: (bookmarks: readonly Bookmark[]) =>
+    sort: (bookmarks) =>
       bookmarks.toSorted((a, b) => compareUtf8(a.alias, b.alias)),
   },
   recent: {
     header: "newest first",
-    sort: (bookmarks: readonly Bookmark[]) => bookmarks,
+    sort: (bookmarks) => bookmarks,
   },
 } as const satisfies Record<
   ListOrder,
@@ -549,41 +363,40 @@ const LIST_ORDERS = {
 
 export function list(dataFile: string, order: ListOrder = "utf8"): string {
   const bookmarks = loadBookmarks(dataFile);
-
   if (bookmarks.length === 0) {
     return "No bookmarks yet. Use 'tp add <alias>' to add one.";
   }
 
-  const { header, sort } = LIST_ORDERS[order];
+  const { header, sort } = LIST_ORDER_VIEWS[order];
   return `Bookmarks (${header}):\n\n${formatBookmarks(sort(bookmarks))}`;
 }
 
-function packageRoot(): string {
-  return join(dirname(fileURLToPath(import.meta.url)), "..");
+export function completions(dataFile: string): string {
+  return loadBookmarks(dataFile)
+    .map(({ alias }) => alias)
+    .join("\n");
+}
+
+function packageFile(name: string): string {
+  return join(dirname(fileURLToPath(import.meta.url)), "..", name);
 }
 
 export function version(): string {
-  const pkgPath = join(packageRoot(), "package.json");
-  const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as { version: string };
-  return pkg.version;
+  const manifest: { readonly version: string } = JSON.parse(
+    readFileSync(packageFile("package.json"), "utf-8"),
+  );
+  return manifest.version;
 }
-
-export const SUPPORTED_SHELLS = ["bash", "zsh", "fish", "nu"] as const;
-
-export type Shell = (typeof SUPPORTED_SHELLS)[number];
 
 function isShell(value: string | undefined): value is Shell {
   return SUPPORTED_SHELLS.some((shell) => shell === value);
 }
 
-export function shellInit(shell?: string): string {
+export function shellInit(shell: string | undefined): string {
   if (!isShell(shell)) {
-    throw new CommandError(
-      `Usage: tp-cli init <${SUPPORTED_SHELLS.join("|")}>`,
-    );
+    throw new CommandError(USAGE.init);
   }
-
-  return readFileSync(join(packageRoot(), `tp.${shell}`), "utf-8").trimEnd();
+  return readFileSync(packageFile(`tp.${shell}`), "utf-8").trimEnd();
 }
 
 export function help(): string {
@@ -609,10 +422,4 @@ Shell setup:
   zsh   eval "$(tp-cli init zsh)"         in ~/.zshrc
   fish  tp-cli init fish | source         in ~/.config/fish/config.fish
   nu    tp-cli init nu | save -f ~/.tp/tp.nu   then: source ~/.tp/tp.nu`;
-}
-
-export function completions(dataFile: string): string {
-  return loadBookmarks(dataFile)
-    .map((b) => b.alias)
-    .join("\n");
 }

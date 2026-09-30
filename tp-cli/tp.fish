@@ -1,7 +1,3 @@
-# tp - Fish shell wrapper for tp directory bookmarks
-# Add to your ~/.config/fish/config.fish:
-#   tp-cli init fish | source
-
 function tp
     set -l output (tp-cli $argv)
     set -l command_status $status

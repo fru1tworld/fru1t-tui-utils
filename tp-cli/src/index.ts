@@ -5,23 +5,25 @@ import { argv, exit, cwd as processCwd } from "node:process";
 import { fileURLToPath } from "node:url";
 import {
   add,
-  CommandError,
   ch,
   completions,
   del,
   gc,
-  getConfigFile,
-  getDataFile,
   go,
   help,
   list,
-  loadConfig,
   parseListOrder,
   set,
   shellInit,
-  type TpConfig,
   version,
 } from "./commands.js";
+import { CommandError } from "./errors.js";
+import {
+  getConfigFile,
+  getDataFile,
+  loadConfig,
+  type TpConfig,
+} from "./store.js";
 
 export function main(
   args: readonly string[],
@@ -61,18 +63,15 @@ export function main(
   }
 }
 
-/* v8 ignore start */
-// The npm global bin is a symlink, so argv[1] differs from the module path.
 if (realpathSync(argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const config = loadConfig(getConfigFile());
     console.log(main(argv.slice(2), processCwd(), getDataFile(), config));
-  } catch (err) {
-    if (err instanceof CommandError) {
-      console.log(err.message);
+  } catch (error) {
+    if (error instanceof CommandError) {
+      console.log(error.message);
       exit(1);
     }
-    throw err;
+    throw error;
   }
 }
-/* v8 ignore stop */

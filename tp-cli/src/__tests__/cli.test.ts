@@ -1,27 +1,23 @@
-import { execSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CommandError } from "../commands.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CommandError } from "../errors.js";
 import { main } from "../index.js";
 
 let tmpDir: string;
 let dataFile: string;
 const cliPath = fileURLToPath(new URL("../../dist/index.js", import.meta.url));
 
-function runCli(args: string): string {
-  try {
-    return execSync(`node ${cliPath} ${args}`, {
-      encoding: "utf-8",
-      env: { ...process.env, HOME: tmpDir, USERPROFILE: tmpDir },
-      cwd: tmpDir,
-    }).trim();
-  } catch (err: unknown) {
-    const e = err as { stdout?: string; stderr?: string };
-    return (e.stdout ?? e.stderr ?? "").toString().trim();
-  }
+function runCli(...args: string[]): { status: number | null; stdout: string } {
+  const result = spawnSync(process.execPath, [cliPath, ...args], {
+    encoding: "utf-8",
+    env: { ...process.env, HOME: tmpDir, USERPROFILE: tmpDir },
+    cwd: tmpDir,
+  });
+  return { status: result.status, stdout: result.stdout.trim() };
 }
 
 beforeEach(() => {
@@ -30,6 +26,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -163,28 +160,31 @@ describe("main() function", () => {
 
 describe("CLI subprocess integration", () => {
   it("shows help with --help", () => {
-    expect(runCli("--help")).toContain(
-      "tp - Teleport to bookmarked directories",
-    );
+    expect(runCli("--help")).toEqual({
+      status: 0,
+      stdout: expect.stringContaining(
+        "tp - Teleport to bookmarked directories",
+      ),
+    });
   });
 
   it("shows version with --version", () => {
-    expect(runCli("--version")).toBe("2.0.0");
+    expect(runCli("--version")).toEqual({ status: 0, stdout: "2.0.0" });
   });
 
   it("shows empty list", () => {
-    expect(runCli("list")).toContain("No bookmarks yet");
+    expect(runCli("list").stdout).toContain("No bookmarks yet");
   });
 
   it("adds and deletes a bookmark", () => {
-    const addOut = runCli("add mydir");
-    expect(addOut).toContain("Added: mydir");
-    const delOut = runCli("del mydir");
-    expect(delOut).toContain("Deleted: mydir");
+    expect(runCli("add", "mydir").stdout).toContain("Added: mydir");
+    expect(runCli("del", "mydir").stdout).toContain("Deleted: mydir");
   });
 
-  it("handles error with exit code", () => {
-    const output = runCli("nonexistent");
-    expect(output).toContain("not found");
+  it("prints command errors on stdout and exits with status 1", () => {
+    expect(runCli("nonexistent")).toEqual({
+      status: 1,
+      stdout: "Alias 'nonexistent' not found.",
+    });
   });
 });

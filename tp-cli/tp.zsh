@@ -1,7 +1,3 @@
-# tp - Zsh shell wrapper for tp directory bookmarks
-# Add to your ~/.zshrc, after compinit:
-#   eval "$(tp-cli init zsh)"
-
 tp() {
     local output
     output=$(tp-cli "$@")
@@ -46,5 +42,4 @@ _tp_completions_zsh() {
     esac
 }
 
-# compdef does not exist until compinit has run
 (( $+functions[compdef] )) && compdef _tp_completions_zsh tp

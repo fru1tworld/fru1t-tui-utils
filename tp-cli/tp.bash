@@ -1,7 +1,3 @@
-# tp - Bash shell wrapper for tp directory bookmarks
-# Add to your ~/.bashrc:
-#   eval "$(tp-cli init bash)"
-
 tp() {
     local output
     output=$(tp-cli "$@")

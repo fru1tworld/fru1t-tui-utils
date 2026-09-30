@@ -1,9 +1,3 @@
-# tp - Nushell wrapper for tp directory bookmarks
-# Nushell's `source` needs a parse-time constant path, so write the wrapper out first:
-#   tp-cli init nu | save -f ~/.tp/tp.nu
-# then add to your config.nu (usually ~/.config/nushell/config.nu):
-#   source ~/.tp/tp.nu
-
 def "nu-complete tp commands" [] {
     let commands = ["add", "set", "del", "ch", "gc", "list", "help"]
     let aliases = (try { tp-cli --completions | lines | where {|it| ($it | str trim) != "" } } catch { [] })

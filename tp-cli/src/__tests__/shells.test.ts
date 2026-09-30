@@ -10,10 +10,6 @@ describe("Shell integration files", () => {
   describe("tp.bash (Bash)", () => {
     const filePath = path.join(root, "tp.bash");
 
-    it("exists", () => {
-      expect(fs.existsSync(filePath)).toBe(true);
-    });
-
     it("contains tp wrapper function", () => {
       const content = fs.readFileSync(filePath, "utf-8");
       expect(content).toContain("tp()");
@@ -44,10 +40,6 @@ describe("Shell integration files", () => {
   describe("tp.zsh (Zsh)", () => {
     const filePath = path.join(root, "tp.zsh");
 
-    it("exists", () => {
-      expect(fs.existsSync(filePath)).toBe(true);
-    });
-
     it("contains tp wrapper function", () => {
       const content = fs.readFileSync(filePath, "utf-8");
       expect(content).toContain("tp()");
@@ -76,10 +68,6 @@ describe("Shell integration files", () => {
 
   describe("tp.nu (Nushell)", () => {
     const filePath = path.join(root, "tp.nu");
-
-    it("exists", () => {
-      expect(fs.existsSync(filePath)).toBe(true);
-    });
 
     it("contains tp wrapper function with --env", () => {
       const content = fs.readFileSync(filePath, "utf-8");
@@ -120,10 +108,6 @@ describe("Shell integration files", () => {
 
   describe("tp.fish (Fish)", () => {
     const filePath = path.join(root, "tp.fish");
-
-    it("exists", () => {
-      expect(fs.existsSync(filePath)).toBe(true);
-    });
 
     it("contains tp wrapper function", () => {
       const content = fs.readFileSync(filePath, "utf-8");

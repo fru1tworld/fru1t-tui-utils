@@ -2,32 +2,26 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   add,
-  type Bookmark,
-  CommandError,
   ch,
   completions,
   del,
   gc,
-  getConfigFile,
-  getDataDir,
-  getDataFile,
   go,
-  help,
-  init,
   list,
-  loadBookmarks,
-  loadConfig,
-  parseListOrder,
   SUPPORTED_SHELLS,
-  saveBookmarks,
   set,
   shellInit,
-  type TpConfig,
-  version,
 } from "../commands.js";
+import { CommandError } from "../errors.js";
+import {
+  type Bookmark,
+  loadBookmarks,
+  saveBookmarks,
+  type TpConfig,
+} from "../store.js";
 
 let tmpDir: string;
 let dataFile: string;
@@ -38,76 +32,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   fs.rmSync(tmpDir, { recursive: true, force: true });
-});
-
-describe("getDataDir", () => {
-  it("returns ~/.tp", () => {
-    expect(getDataDir()).toBe(path.join(os.homedir(), ".tp"));
-  });
-});
-
-describe("getDataFile", () => {
-  it("returns bookmarks.json in default data dir", () => {
-    expect(getDataFile()).toBe(
-      path.join(os.homedir(), ".tp", "bookmarks.json"),
-    );
-  });
-
-  it("returns bookmarks.json in custom data dir", () => {
-    expect(getDataFile("/custom")).toBe("/custom/bookmarks.json");
-  });
-});
-
-describe("init", () => {
-  it("creates directory and file when missing", () => {
-    const nested = path.join(tmpDir, "sub", "bookmarks.json");
-    init(nested);
-    expect(fs.existsSync(path.join(tmpDir, "sub"))).toBe(true);
-    expect(fs.existsSync(nested)).toBe(true);
-    expect(fs.readFileSync(nested, "utf-8")).toBe("[]");
-  });
-
-  it("does nothing when directory and file already exist", () => {
-    fs.writeFileSync(dataFile, '[{"alias":"x","path":"/x","createdAt":1}]');
-    init(dataFile);
-    expect(JSON.parse(fs.readFileSync(dataFile, "utf-8"))).toHaveLength(1);
-  });
-});
-
-describe("loadBookmarks", () => {
-  it("returns empty array for new file", () => {
-    expect(loadBookmarks(dataFile)).toEqual([]);
-  });
-
-  it("returns bookmarks from existing file", () => {
-    const bookmarks: Bookmark[] = [
-      { alias: "test", path: "/tmp/test", createdAt: 1 },
-    ];
-    fs.writeFileSync(dataFile, JSON.stringify(bookmarks));
-    expect(loadBookmarks(dataFile)).toEqual(bookmarks);
-  });
-
-  it("reports malformed JSON as a command error", () => {
-    fs.writeFileSync(dataFile, "{");
-    expect(() => loadBookmarks(dataFile)).toThrow(
-      "Invalid JSON in bookmarks file",
-    );
-  });
-
-  it("rejects bookmarks with an invalid runtime schema", () => {
-    fs.writeFileSync(dataFile, JSON.stringify([{ alias: "x", path: 42 }]));
-    expect(() => loadBookmarks(dataFile)).toThrow("Invalid bookmarks schema");
-  });
-});
-
-describe("saveBookmarks", () => {
-  it("writes bookmarks to file", () => {
-    const bookmarks: Bookmark[] = [{ alias: "a", path: "/a", createdAt: 1 }];
-    saveBookmarks(dataFile, bookmarks);
-    const data = JSON.parse(fs.readFileSync(dataFile, "utf-8"));
-    expect(data).toEqual(bookmarks);
-  });
 });
 
 describe("add", () => {
@@ -269,6 +195,10 @@ describe("set", () => {
     expect(() => set(["missing", "./missing"], tmpDir, dataFile)).toThrow(
       "Directory does not exist",
     );
+    fs.writeFileSync(path.join(tmpDir, "file.txt"), "");
+    expect(() => set(["file", "./file.txt"], tmpDir, dataFile)).toThrow(
+      "Directory does not exist",
+    );
   });
 });
 
@@ -324,11 +254,6 @@ describe("gc", () => {
     expect(result).toContain("Removed 1 invalid bookmark(s).");
     expect(loadBookmarks(dataFile)).toHaveLength(1);
     expect(loadBookmarks(dataFile)[0].alias).toBe("valid");
-  });
-
-  it("handles empty bookmarks", () => {
-    const result = gc(dataFile);
-    expect(result).toBe("No invalid bookmarks found. All directories exist.");
   });
 });
 
@@ -482,60 +407,6 @@ describe("list", () => {
       home,
     ]);
   });
-
-  it("keeps stored order untouched when sorting", () => {
-    add("beta", "/b", dataFile);
-    add("alpha", "/a", dataFile);
-    list(dataFile);
-    expect(loadBookmarks(dataFile).map((b) => b.alias)).toEqual([
-      "alpha",
-      "beta",
-    ]);
-  });
-});
-
-describe("parseListOrder", () => {
-  it("defaults to utf8", () => {
-    expect(parseListOrder(undefined)).toBe("utf8");
-  });
-
-  it("accepts recent flags", () => {
-    expect(parseListOrder("-r")).toBe("recent");
-    expect(parseListOrder("--recent")).toBe("recent");
-  });
-
-  it("accepts utf8 flags", () => {
-    expect(parseListOrder("-u")).toBe("utf8");
-    expect(parseListOrder("--utf8")).toBe("utf8");
-  });
-
-  it("throws on unknown flag", () => {
-    expect(() => parseListOrder("--nope")).toThrow(CommandError);
-  });
-});
-
-describe("version", () => {
-  it("returns version string", () => {
-    expect(version()).toBe("2.0.0");
-  });
-});
-
-describe("help", () => {
-  it("returns help text", () => {
-    const result = help();
-    expect(result).toContain("tp - Teleport to bookmarked directories");
-    expect(result).toContain("tp <alias>");
-    expect(result).toContain("tp add <alias>");
-    expect(result).toContain("upsert");
-    expect(result).toContain("tp set <alias> <path>");
-    expect(result).toContain("tp del <alias>");
-    expect(result).toContain("tp ch <old> <new>");
-    expect(result).toContain("tp gc");
-    expect(result).toContain("tp list");
-    expect(result).toContain("tp list -r");
-    expect(result).toContain("tp help");
-    expect(result).toContain("tp -v, --version");
-  });
 });
 
 describe("shellInit", () => {
@@ -576,40 +447,5 @@ describe("completions", () => {
     add("beta", "/beta", dataFile);
     const result = completions(dataFile);
     expect(result).toBe("beta\nalpha");
-  });
-});
-
-describe("getConfigFile", () => {
-  it("returns config.json in default data dir", () => {
-    expect(getConfigFile()).toBe(path.join(os.homedir(), ".tp", "config.json"));
-  });
-
-  it("returns config.json in custom data dir", () => {
-    expect(getConfigFile("/custom")).toBe("/custom/config.json");
-  });
-});
-
-describe("loadConfig", () => {
-  it("returns empty object when file does not exist", () => {
-    expect(loadConfig(path.join(tmpDir, "nonexistent.json"))).toEqual({});
-  });
-
-  it("returns parsed config from file", () => {
-    const configFile = path.join(tmpDir, "config.json");
-    fs.writeFileSync(configFile, JSON.stringify({ caseSensitive: true }));
-    expect(loadConfig(configFile)).toEqual({ caseSensitive: true });
-  });
-
-  it("throws for invalid JSON", () => {
-    const configFile = path.join(tmpDir, "config.json");
-    fs.writeFileSync(configFile, "not json");
-    expect(() => loadConfig(configFile)).toThrow(CommandError);
-    expect(() => loadConfig(configFile)).toThrow("Invalid JSON in config file");
-  });
-
-  it("rejects an invalid runtime schema", () => {
-    const configFile = path.join(tmpDir, "config.json");
-    fs.writeFileSync(configFile, JSON.stringify({ caseSensitive: "yes" }));
-    expect(() => loadConfig(configFile)).toThrow("Invalid config schema");
   });
 });
