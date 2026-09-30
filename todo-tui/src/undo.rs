@@ -2,7 +2,6 @@ use std::collections::VecDeque;
 
 use crate::db::{Project, Todo};
 
-#[derive(Clone)]
 pub(crate) struct Snapshot {
     pub(crate) projects: Vec<Project>,
     pub(crate) todos: Vec<Todo>,

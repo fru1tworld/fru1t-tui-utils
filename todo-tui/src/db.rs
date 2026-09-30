@@ -1,33 +1,100 @@
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use anyhow::Context;
 use chrono::{DateTime, Local};
+use rusqlite::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use rusqlite::{Connection, Result, TransactionBehavior};
 use serde::Serialize;
-use std::path::PathBuf;
-use std::time::Duration;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct TodoId(pub i64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct ProjectId(pub i64);
+
+impl fmt::Display for TodoId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl fmt::Display for ProjectId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl ToSql for TodoId {
+    fn to_sql(&self) -> Result<ToSqlOutput<'_>> {
+        self.0.to_sql()
+    }
+}
+
+impl ToSql for ProjectId {
+    fn to_sql(&self) -> Result<ToSqlOutput<'_>> {
+        self.0.to_sql()
+    }
+}
+
+impl FromSql for TodoId {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        i64::column_result(value).map(Self)
+    }
+}
+
+impl FromSql for ProjectId {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        i64::column_result(value).map(Self)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Project {
-    pub id: i64,
+    pub id: ProjectId,
     pub name: String,
     pub position: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Todo {
-    pub id: i64,
+    pub id: TodoId,
     pub text: String,
     pub created_at: i64,
     pub done: bool,
-    pub parent_id: Option<i64>,
+    pub parent_id: Option<TodoId>,
     #[serde(skip)]
     pub collapsed: bool,
     pub position: i64,
-    pub project_id: i64,
+    pub project_id: ProjectId,
 }
 
 impl Todo {
     pub fn created_at_string(&self) -> String {
-        format_epoch(self.created_at, "%Y-%m-%d %H:%M")
+        DateTime::from_timestamp(self.created_at, 0).map_or_else(
+            || "?".to_string(),
+            |dt| {
+                dt.with_timezone(&Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string()
+            },
+        )
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentCompletion {
+    Reopen,
+    Keep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreOutcome {
+    Restored,
+    ChangedExternally,
 }
 
 const TODO_COLS: &str = "id, text, created_at, done, position, parent_id, collapsed, project_id";
@@ -45,64 +112,54 @@ fn todo_from_row(row: &rusqlite::Row) -> Result<Todo> {
     })
 }
 
+const MIGRATIONS: [fn(&Connection) -> Result<()>; 3] = [migrate_v1, migrate_v2, migrate_v3];
+
 pub struct Store {
     conn: Connection,
 }
 
 impl Store {
-    pub fn data_version(&self) -> Result<i64> {
-        self.conn.query_row("PRAGMA data_version", [], |r| r.get(0))
-    }
-
-    pub fn open_default() -> Result<Self> {
+    pub fn open_default() -> anyhow::Result<Self> {
         let path = default_db_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).with_context(|| {
+                format!("데이터 디렉터리를 만들 수 없습니다: {}", dir.display())
+            })?;
         }
-        Self::open(path)
+        Self::open(&path).with_context(|| format!("DB를 열 수 없습니다: {}", path.display()))
     }
 
-    pub fn open(path: PathBuf) -> Result<Self> {
+    pub fn open(path: &Path) -> Result<Self> {
         Self::from_connection(Connection::open(path)?)
     }
 
     fn from_connection(mut conn: Connection) -> Result<Self> {
         conn.set_transaction_behavior(TransactionBehavior::Immediate);
+        conn.busy_timeout(Duration::from_secs(5))?;
+        conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
         let store = Self { conn };
-        store.conn.busy_timeout(Duration::from_secs(5))?;
-        store
-            .conn
-            .execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
         store.migrate()?;
-        // 마이그레이션(테이블 재구축) 이후에만 외래 키 검사를 켠다.
         store.conn.pragma_update(None, "foreign_keys", true)?;
         Ok(store)
     }
 
-    /// PRAGMA user_version 기반 버전 마이그레이션.
     fn migrate(&self) -> Result<()> {
-        let version: i64 = self
+        let current: i64 = self
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version < 1 {
-            let tx = self.conn.unchecked_transaction()?;
-            migrate_v1(&tx)?;
-            tx.pragma_update(None, "user_version", 1)?;
-            tx.commit()?;
-        }
-        if version < 2 {
-            let tx = self.conn.unchecked_transaction()?;
-            migrate_v2(&tx)?;
-            tx.pragma_update(None, "user_version", 2)?;
-            tx.commit()?;
-        }
-        if version < 3 {
-            let tx = self.conn.unchecked_transaction()?;
-            migrate_v3(&tx)?;
-            tx.pragma_update(None, "user_version", 3)?;
-            tx.commit()?;
+        for (version, migration) in (1_i64..).zip(MIGRATIONS) {
+            if current < version {
+                let tx = self.conn.unchecked_transaction()?;
+                migration(&tx)?;
+                tx.pragma_update(None, "user_version", version)?;
+                tx.commit()?;
+            }
         }
         Ok(())
+    }
+
+    pub fn data_version(&self) -> Result<i64> {
+        self.conn.query_row("PRAGMA data_version", [], |r| r.get(0))
     }
 
     pub fn list_projects(&self) -> Result<Vec<Project>> {
@@ -119,53 +176,44 @@ impl Store {
         rows.collect()
     }
 
-    pub fn add_project(&self, name: &str) -> Result<i64> {
-        let pos: i64 = self.conn.query_row(
+    pub fn add_project(&self, name: &str) -> Result<ProjectId> {
+        let position: i64 = self.conn.query_row(
             "SELECT COALESCE(MAX(position), 0) + 1 FROM projects",
             [],
             |r| r.get(0),
         )?;
         self.conn.execute(
             "INSERT INTO projects (name, position) VALUES (?1, ?2)",
-            (name, pos),
+            (name, position),
         )?;
-        Ok(self.conn.last_insert_rowid())
+        Ok(ProjectId(self.conn.last_insert_rowid()))
     }
 
-    /// 전달받은 순서대로 프로젝트 position을 1부터 다시 매긴다(탭 순서 변경용).
-    pub fn set_project_positions(&self, order: &[i64]) -> Result<()> {
-        self.renumber("UPDATE projects SET position = ?1 WHERE id = ?2", order)
-    }
-
-    /// 전달받은 순서대로 position을 1부터 다시 매기는 공통 루틴.
-    fn renumber(&self, sql: &str, order: &[i64]) -> Result<()> {
+    pub fn set_project_positions(&self, order: &[ProjectId]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        {
-            let mut stmt = tx.prepare(sql)?;
-            for (i, id) in order.iter().enumerate() {
-                ensure_row_changed(stmt.execute((i as i64 + 1, id))?)?;
-            }
-        }
+        renumber(
+            &tx,
+            "UPDATE projects SET position = ?1 WHERE id = ?2",
+            order,
+        )?;
         tx.commit()
     }
 
-    pub fn rename_project(&self, id: i64, name: &str) -> Result<()> {
+    pub fn rename_project(&self, id: ProjectId, name: &str) -> Result<()> {
         let changed_rows = self
             .conn
             .execute("UPDATE projects SET name = ?1 WHERE id = ?2", (name, id))?;
         ensure_row_changed(changed_rows)
     }
 
-    pub fn delete_project(&self, id: i64) -> Result<()> {
-        // 소속 할 일은 project_id의 ON DELETE CASCADE가 지운다.
+    pub fn delete_project(&self, id: ProjectId) -> Result<()> {
         let changed_rows = self
             .conn
             .execute("DELETE FROM projects WHERE id = ?1", [id])?;
         ensure_row_changed(changed_rows)
     }
 
-    /// 한 프로젝트의 할 일을 부모→자식→손자 순으로 중첩해 반환한다(최대 3단계).
-    pub fn list(&self, project_id: i64) -> Result<Vec<Todo>> {
+    pub fn list_todos(&self, project_id: ProjectId) -> Result<Vec<Todo>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {TODO_COLS} FROM todos WHERE project_id = ?1
              ORDER BY done ASC, position ASC, id ASC"
@@ -178,8 +226,7 @@ impl Store {
         Ok(out)
     }
 
-    /// 전 프로젝트의 할 일을 id 순으로 반환한다(스냅숏·복원용, 부모가 항상 자식보다 앞).
-    pub fn list_all(&self) -> Result<Vec<Todo>> {
+    pub fn list_all_todos(&self) -> Result<Vec<Todo>> {
         let mut stmt = self
             .conn
             .prepare(&format!("SELECT {TODO_COLS} FROM todos ORDER BY id ASC"))?;
@@ -187,22 +234,18 @@ impl Store {
         rows.collect()
     }
 
-    /// 외부 쓰기와 경합하지 않을 때만 두 테이블을 스냅숏 상태로 되돌린다.
-    /// IMMEDIATE 트랜잭션을 먼저 확보하므로 버전 확인 이후 다른 writer가 끼어들 수 없다.
-    pub fn replace_all_if_unchanged(
+    pub fn restore_if_unchanged(
         &self,
         projects: &[Project],
         todos: &[Todo],
         expected_data_version: i64,
-    ) -> Result<bool> {
+    ) -> Result<RestoreOutcome> {
         let tx = self.conn.unchecked_transaction()?;
         let current_data_version: i64 =
             tx.query_row("PRAGMA data_version", [], |row| row.get(0))?;
         if current_data_version != expected_data_version {
-            return Ok(false);
+            return Ok(RestoreOutcome::ChangedExternally);
         }
-        // 순서 변경 뒤 들여쓰기하면 부모 id가 자식보다 클 수 있어 id 순 insert가
-        // FK에 걸린다. 검사를 커밋 시점으로 미룬다(커밋 후 자동 원복).
         tx.pragma_update(None, "defer_foreign_keys", true)?;
         tx.execute("DELETE FROM todos", [])?;
         tx.execute("DELETE FROM projects", [])?;
@@ -229,20 +272,24 @@ impl Store {
             }
         }
         tx.commit()?;
-        Ok(true)
+        Ok(RestoreOutcome::Restored)
     }
 
-    pub fn add(&self, text: &str, parent_id: Option<i64>, project_id: i64) -> Result<i64> {
+    pub fn add_todo(
+        &self,
+        text: &str,
+        parent_id: Option<TodoId>,
+        project_id: ProjectId,
+    ) -> Result<TodoId> {
         let tx = self.conn.unchecked_transaction()?;
         let id = insert_todo(&tx, text, parent_id, project_id)?;
         tx.commit()?;
         Ok(id)
     }
 
-    /// 하위 목표 추가 + 부모 완료 해제·펼치기를 한 트랜잭션으로 처리한다.
-    pub fn add_subtask(&self, text: &str, parent_id: i64) -> Result<i64> {
+    pub fn add_subtask(&self, text: &str, parent_id: TodoId) -> Result<TodoId> {
         let tx = self.conn.unchecked_transaction()?;
-        let project_id: i64 = tx.query_row(
+        let project_id: ProjectId = tx.query_row(
             "SELECT project_id FROM todos WHERE id = ?1",
             [parent_id],
             |r| r.get(0),
@@ -256,15 +303,14 @@ impl Store {
         Ok(id)
     }
 
-    pub fn update_text(&self, id: i64, text: &str) -> Result<()> {
+    pub fn update_todo_text(&self, id: TodoId, text: &str) -> Result<()> {
         let changed_rows = self
             .conn
             .execute("UPDATE todos SET text = ?1 WHERE id = ?2", (text, id))?;
         ensure_row_changed(changed_rows)
     }
 
-    /// 여러 항목의 완료 상태를 한 트랜잭션으로 갱신한다(부모-자식 전파용).
-    pub fn set_done_many(&self, updates: &[(i64, bool)]) -> Result<()> {
+    pub fn set_done_many(&self, updates: &[(TodoId, bool)]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         {
             let mut stmt = tx.prepare("UPDATE todos SET done = ?1 WHERE id = ?2")?;
@@ -275,38 +321,39 @@ impl Store {
         tx.commit()
     }
 
-    /// 항목을 부모 밑으로 넣고 맨 뒤 position 부여, 부모 펼침(필요 시 완료 해제)까지 한 트랜잭션.
-    pub fn indent(&self, id: i64, parent: i64, reopen_parent: bool) -> Result<()> {
+    pub fn indent(
+        &self,
+        id: TodoId,
+        parent: TodoId,
+        parent_completion: ParentCompletion,
+    ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        let pos: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(position), 0) + 1 FROM todos",
-            [],
-            |r| r.get(0),
-        )?;
+        let position = next_todo_position(&tx)?;
         ensure_row_changed(tx.execute(
             "UPDATE todos SET parent_id = ?1, position = ?2 WHERE id = ?3",
-            (parent, pos, id),
+            (parent, position, id),
         )?)?;
         ensure_row_changed(tx.execute("UPDATE todos SET collapsed = 0 WHERE id = ?1", [parent])?)?;
-        if reopen_parent {
+        if parent_completion == ParentCompletion::Reopen {
             ensure_row_changed(tx.execute("UPDATE todos SET done = 0 WHERE id = ?1", [parent])?)?;
         }
         tx.commit()
     }
 
-    /// 전달받은 순서대로 position을 1부터 다시 매긴다(형제 그룹 재배열용).
-    pub fn set_positions(&self, order: &[i64]) -> Result<()> {
-        self.renumber("UPDATE todos SET position = ?1 WHERE id = ?2", order)
+    pub fn set_todo_positions(&self, order: &[TodoId]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        renumber(&tx, "UPDATE todos SET position = ?1 WHERE id = ?2", order)?;
+        tx.commit()
     }
 
-    /// 항목과 하위 전체를 다른 프로젝트로 옮긴다. 옮긴 항목은 그쪽 최상위 맨 뒤가 된다.
-    pub fn move_to_project(&self, root: i64, subtree: &[i64], project_id: i64) -> Result<()> {
+    pub fn move_to_project(
+        &self,
+        root: TodoId,
+        subtree: &[TodoId],
+        project_id: ProjectId,
+    ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        let pos: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(position), 0) + 1 FROM todos",
-            [],
-            |r| r.get(0),
-        )?;
+        let position = next_todo_position(&tx)?;
         {
             let mut stmt = tx.prepare("UPDATE todos SET project_id = ?1 WHERE id = ?2")?;
             for id in subtree {
@@ -315,28 +362,31 @@ impl Store {
         }
         ensure_row_changed(tx.execute(
             "UPDATE todos SET parent_id = NULL, position = ?1 WHERE id = ?2",
-            (pos, root),
+            (position, root),
         )?)?;
         tx.commit()
     }
 
-    /// 항목을 한 단계 위(new_parent)로 빼고 그 단계의 형제 순서대로 position을 다시 매긴다.
-    pub fn outdent(&self, id: i64, new_parent: Option<i64>, sibling_order: &[i64]) -> Result<()> {
+    pub fn outdent(
+        &self,
+        id: TodoId,
+        new_parent: Option<TodoId>,
+        sibling_order: &[TodoId],
+    ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         ensure_row_changed(tx.execute(
             "UPDATE todos SET parent_id = ?1 WHERE id = ?2",
             (new_parent, id),
         )?)?;
-        {
-            let mut stmt = tx.prepare("UPDATE todos SET position = ?1 WHERE id = ?2")?;
-            for (i, tid) in sibling_order.iter().enumerate() {
-                ensure_row_changed(stmt.execute((i as i64 + 1, tid))?)?;
-            }
-        }
+        renumber(
+            &tx,
+            "UPDATE todos SET position = ?1 WHERE id = ?2",
+            sibling_order,
+        )?;
         tx.commit()
     }
 
-    pub fn set_collapsed(&self, id: i64, collapsed: bool) -> Result<()> {
+    pub fn set_collapsed(&self, id: TodoId, collapsed: bool) -> Result<()> {
         let changed_rows = self.conn.execute(
             "UPDATE todos SET collapsed = ?1 WHERE id = ?2",
             (collapsed, id),
@@ -344,33 +394,43 @@ impl Store {
         ensure_row_changed(changed_rows)
     }
 
-    pub fn delete(&self, id: i64) -> Result<()> {
-        // 자식 삭제는 parent_id의 ON DELETE CASCADE가 처리한다.
+    pub fn delete_todo(&self, id: TodoId) -> Result<()> {
         let changed_rows = self.conn.execute("DELETE FROM todos WHERE id = ?1", [id])?;
         ensure_row_changed(changed_rows)
     }
 }
 
-/// 같은 부모를 가진 항목들을 순서대로 밀어 넣고, 각 항목 뒤에 그 하위를 재귀로 잇는다.
-fn push_nested(all: &[Todo], parent: Option<i64>, out: &mut Vec<Todo>) {
+fn push_nested(all: &[Todo], parent: Option<TodoId>, out: &mut Vec<Todo>) {
     for t in all.iter().filter(|t| t.parent_id == parent) {
         out.push(t.clone());
         push_nested(all, Some(t.id), out);
     }
 }
 
-fn insert_todo(
-    conn: &Connection,
-    text: &str,
-    parent_id: Option<i64>,
-    project_id: i64,
-) -> Result<i64> {
-    let now = Local::now().timestamp();
-    let pos: i64 = conn.query_row(
+fn renumber(conn: &Connection, sql: &str, order: &[impl ToSql]) -> Result<()> {
+    let mut stmt = conn.prepare(sql)?;
+    for (position, id) in (1_i64..).zip(order) {
+        ensure_row_changed(stmt.execute((position, id))?)?;
+    }
+    Ok(())
+}
+
+fn next_todo_position(conn: &Connection) -> Result<i64> {
+    conn.query_row(
         "SELECT COALESCE(MAX(position), 0) + 1 FROM todos",
         [],
         |r| r.get(0),
-    )?;
+    )
+}
+
+fn insert_todo(
+    conn: &Connection,
+    text: &str,
+    parent_id: Option<TodoId>,
+    project_id: ProjectId,
+) -> Result<TodoId> {
+    let now = Local::now().timestamp();
+    let position = next_todo_position(conn)?;
     let changed_rows = conn.execute(
         "INSERT INTO todos (text, created_at, done, position, parent_id, project_id)
          SELECT ?1, ?2, 0, ?3, ?4, ?5
@@ -379,10 +439,10 @@ fn insert_todo(
                 SELECT 1 FROM todos parent
                 WHERE parent.id = ?4 AND parent.project_id = ?5
             )",
-        (text, now, pos, parent_id, project_id),
+        (text, now, position, parent_id, project_id),
     )?;
     ensure_row_changed(changed_rows)?;
-    Ok(conn.last_insert_rowid())
+    Ok(TodoId(conn.last_insert_rowid()))
 }
 
 fn ensure_row_changed(changed_rows: usize) -> Result<()> {
@@ -392,8 +452,6 @@ fn ensure_row_changed(changed_rows: usize) -> Result<()> {
     Ok(())
 }
 
-/// v1: 최종 스키마로 재구축한다. 레거시 테이블(누락 컬럼 포함)을 흡수하고
-/// parent_id에 ON DELETE CASCADE 외래 키를 건다.
 fn migrate_v1(conn: &Connection) -> Result<()> {
     let has_table: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'todos')",
@@ -402,7 +460,6 @@ fn migrate_v1(conn: &Connection) -> Result<()> {
     )?;
 
     if has_table {
-        // 레거시 스키마에 없는 컬럼을 먼저 채워 아래 복사 SELECT 목록을 통일한다.
         let existing = column_names(conn)?;
         let added = [
             ("due_at", "ALTER TABLE todos ADD COLUMN due_at INTEGER"),
@@ -452,8 +509,6 @@ fn migrate_v1(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// v2: projects 테이블을 만들고 기존 할 일을 기본 프로젝트로 옮긴다.
-/// todos는 project_id(ON DELETE CASCADE) 외래 키를 갖도록 재구축한다.
 fn migrate_v2(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE projects (
@@ -482,7 +537,6 @@ fn migrate_v2(conn: &Connection) -> Result<()> {
     )
 }
 
-/// v3: 더 이상 사용하지 않는 due_at 컬럼과 저장된 마감 값을 제거한다.
 fn migrate_v3(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE todos_v3 (
@@ -509,13 +563,6 @@ fn column_names(conn: &Connection) -> Result<Vec<String>> {
     rows.collect()
 }
 
-fn format_epoch(epoch: i64, fmt: &str) -> String {
-    DateTime::from_timestamp(epoch, 0).map_or_else(
-        || "?".to_string(),
-        |dt| dt.with_timezone(&Local).format(fmt).to_string(),
-    )
-}
-
 fn default_db_path() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -531,11 +578,11 @@ mod tests {
         Store::from_connection(Connection::open_in_memory().unwrap()).unwrap()
     }
 
-    fn default_project(s: &Store) -> i64 {
+    fn default_project(s: &Store) -> ProjectId {
         s.list_projects().unwrap()[0].id
     }
 
-    fn position_of(s: &Store, id: i64) -> i64 {
+    fn position_of(s: &Store, id: TodoId) -> i64 {
         s.conn
             .query_row("SELECT position FROM todos WHERE id = ?1", [id], |r| {
                 r.get(0)
@@ -543,8 +590,8 @@ mod tests {
             .unwrap()
     }
 
-    fn texts(s: &Store, project_id: i64) -> Vec<String> {
-        s.list(project_id)
+    fn texts(s: &Store, project_id: ProjectId) -> Vec<String> {
+        s.list_todos(project_id)
             .unwrap()
             .iter()
             .map(|t| t.text.clone())
@@ -555,46 +602,34 @@ mod tests {
     fn add_list_update_toggle_delete_roundtrip() {
         let s = mem_store();
         let pid = default_project(&s);
-        assert!(s.list(pid).unwrap().is_empty());
+        assert!(s.list_todos(pid).unwrap().is_empty());
 
-        let id = s.add("첫 번째 할 일", None, pid).unwrap();
-        let todos = s.list(pid).unwrap();
+        let id = s.add_todo("첫 번째 할 일", None, pid).unwrap();
+        let todos = s.list_todos(pid).unwrap();
         assert_eq!(todos.len(), 1);
         assert_eq!(todos[0].text, "첫 번째 할 일");
         assert_eq!(todos[0].project_id, pid);
         assert!(!todos[0].done);
         assert!(todos[0].created_at > 0);
 
-        s.update_text(id, "수정됨").unwrap();
-        let t = &s.list(pid).unwrap()[0];
+        s.update_todo_text(id, "수정됨").unwrap();
+        let t = &s.list_todos(pid).unwrap()[0];
         assert_eq!(t.text, "수정됨");
 
         s.set_done_many(&[(id, true)]).unwrap();
-        assert!(s.list(pid).unwrap()[0].done);
+        assert!(s.list_todos(pid).unwrap()[0].done);
 
-        s.delete(id).unwrap();
-        assert!(s.list(pid).unwrap().is_empty());
-    }
-
-    #[test]
-    fn add_assigns_increasing_position() {
-        let s = mem_store();
-        let pid = default_project(&s);
-        let a = s.add("a", None, pid).unwrap();
-        let b = s.add("b", None, pid).unwrap();
-        let c = s.add("c", None, pid).unwrap();
-        assert!(position_of(&s, a) < position_of(&s, b));
-        assert!(position_of(&s, b) < position_of(&s, c));
-        assert_eq!(texts(&s, pid), ["a", "b", "c"]);
+        s.delete_todo(id).unwrap();
+        assert!(s.list_todos(pid).unwrap().is_empty());
     }
 
     #[test]
     fn done_items_sink_to_bottom() {
         let s = mem_store();
         let pid = default_project(&s);
-        let a = s.add("a", None, pid).unwrap();
-        s.add("b", None, pid).unwrap();
-        s.add("c", None, pid).unwrap();
+        let a = s.add_todo("a", None, pid).unwrap();
+        s.add_todo("b", None, pid).unwrap();
+        s.add_todo("c", None, pid).unwrap();
 
         s.set_done_many(&[(a, true)]).unwrap();
         assert_eq!(texts(&s, pid), ["b", "c", "a"]);
@@ -607,24 +642,13 @@ mod tests {
     fn done_children_sink_within_parent() {
         let s = mem_store();
         let pid = default_project(&s);
-        let p = s.add("p", None, pid).unwrap();
-        let c1 = s.add("c1", Some(p), pid).unwrap();
-        s.add("c2", Some(p), pid).unwrap();
-        s.add("q", None, pid).unwrap();
+        let p = s.add_todo("p", None, pid).unwrap();
+        let c1 = s.add_todo("c1", Some(p), pid).unwrap();
+        s.add_todo("c2", Some(p), pid).unwrap();
+        s.add_todo("q", None, pid).unwrap();
 
         s.set_done_many(&[(c1, true)]).unwrap();
         assert_eq!(texts(&s, pid), ["p", "c2", "c1", "q"]);
-    }
-
-    #[test]
-    fn set_positions_reorders() {
-        let s = mem_store();
-        let pid = default_project(&s);
-        let a = s.add("a", None, pid).unwrap();
-        let b = s.add("b", None, pid).unwrap();
-        let c = s.add("c", None, pid).unwrap();
-        s.set_positions(&[c, a, b]).unwrap();
-        assert_eq!(texts(&s, pid), ["c", "a", "b"]);
     }
 
     #[test]
@@ -647,10 +671,10 @@ mod tests {
         let store = Store::from_connection(conn).unwrap();
 
         let pid = default_project(&store);
-        let t = &store.list(pid).unwrap()[0];
+        let t = &store.list_todos(pid).unwrap()[0];
         assert_eq!(t.text, "old");
         assert_eq!(t.project_id, pid);
-        assert_eq!(position_of(&store, t.id), t.id);
+        assert_eq!(position_of(&store, t.id), t.id.0);
     }
 
     #[test]
@@ -688,9 +712,8 @@ mod tests {
         let pid = default_project(&store);
         assert_eq!(texts(&store, pid), ["p", "c"]);
 
-        // 재구축된 테이블의 FK CASCADE로 자식까지 지워진다.
-        store.delete(1).unwrap();
-        assert!(store.list(pid).unwrap().is_empty());
+        store.delete_todo(TodoId(1)).unwrap();
+        assert!(store.list_todos(pid).unwrap().is_empty());
     }
 
     #[test]
@@ -723,7 +746,7 @@ mod tests {
 
         let store = Store::from_connection(conn).unwrap();
 
-        assert_eq!(texts(&store, 1), ["마감이 있던 항목"]);
+        assert_eq!(texts(&store, ProjectId(1)), ["마감이 있던 항목"]);
         assert!(
             !column_names(&store.conn)
                 .unwrap()
@@ -742,10 +765,10 @@ mod tests {
     fn list_nests_children_after_parent() {
         let s = mem_store();
         let pid = default_project(&s);
-        let a = s.add("a", None, pid).unwrap();
-        s.add("b", None, pid).unwrap();
-        s.add("a2", Some(a), pid).unwrap();
-        s.add("a1", Some(a), pid).unwrap();
+        let a = s.add_todo("a", None, pid).unwrap();
+        s.add_todo("b", None, pid).unwrap();
+        s.add_todo("a2", Some(a), pid).unwrap();
+        s.add_todo("a1", Some(a), pid).unwrap();
         assert_eq!(texts(&s, pid), ["a", "a2", "a1", "b"]);
     }
 
@@ -753,10 +776,10 @@ mod tests {
     fn list_nests_three_levels() {
         let s = mem_store();
         let pid = default_project(&s);
-        let a = s.add("a", None, pid).unwrap();
-        s.add("b", None, pid).unwrap();
-        let a1 = s.add("a1", Some(a), pid).unwrap();
-        s.add("a1-1", Some(a1), pid).unwrap();
+        let a = s.add_todo("a", None, pid).unwrap();
+        s.add_todo("b", None, pid).unwrap();
+        let a1 = s.add_todo("a1", Some(a), pid).unwrap();
+        s.add_todo("a1-1", Some(a1), pid).unwrap();
         assert_eq!(texts(&s, pid), ["a", "a1", "a1-1", "b"]);
     }
 
@@ -764,12 +787,12 @@ mod tests {
     fn delete_parent_removes_children() {
         let s = mem_store();
         let pid = default_project(&s);
-        let p = s.add("p", None, pid).unwrap();
-        s.add("c1", Some(p), pid).unwrap();
-        s.add("c2", Some(p), pid).unwrap();
-        assert_eq!(s.list(pid).unwrap().len(), 3);
-        s.delete(p).unwrap();
-        assert!(s.list(pid).unwrap().is_empty());
+        let p = s.add_todo("p", None, pid).unwrap();
+        s.add_todo("c1", Some(p), pid).unwrap();
+        s.add_todo("c2", Some(p), pid).unwrap();
+        assert_eq!(s.list_todos(pid).unwrap().len(), 3);
+        s.delete_todo(p).unwrap();
+        assert!(s.list_todos(pid).unwrap().is_empty());
     }
 
     #[test]
@@ -777,8 +800,8 @@ mod tests {
         let s = mem_store();
         let p1 = default_project(&s);
         let p2 = s.add_project("업무").unwrap();
-        s.add("개인 일", None, p1).unwrap();
-        s.add("회사 일", None, p2).unwrap();
+        s.add_todo("개인 일", None, p1).unwrap();
+        s.add_todo("회사 일", None, p2).unwrap();
         assert_eq!(texts(&s, p1), ["개인 일"]);
         assert_eq!(texts(&s, p2), ["회사 일"]);
     }
@@ -788,24 +811,26 @@ mod tests {
         let store = mem_store();
         let personal_project_id = default_project(&store);
         let work_project_id = store.add_project("업무").unwrap();
-        let parent_id = store.add("개인 상위", None, personal_project_id).unwrap();
+        let parent_id = store
+            .add_todo("개인 상위", None, personal_project_id)
+            .unwrap();
 
         assert!(
             store
-                .add("잘못된 하위", Some(parent_id), work_project_id)
+                .add_todo("잘못된 하위", Some(parent_id), work_project_id)
                 .is_err()
         );
         assert_eq!(texts(&store, personal_project_id), ["개인 상위"]);
-        assert!(store.list(work_project_id).unwrap().is_empty());
+        assert!(store.list_todos(work_project_id).unwrap().is_empty());
     }
 
     #[test]
     fn mutations_report_missing_rows() {
         let store = mem_store();
 
-        assert!(store.update_text(999, "없음").is_err());
-        assert!(store.delete(999).is_err());
-        assert!(store.rename_project(999, "없음").is_err());
+        assert!(store.update_todo_text(TodoId(999), "없음").is_err());
+        assert!(store.delete_todo(TodoId(999)).is_err());
+        assert!(store.rename_project(ProjectId(999), "없음").is_err());
     }
 
     #[test]
@@ -813,10 +838,10 @@ mod tests {
         let s = mem_store();
         let p1 = default_project(&s);
         let p2 = s.add_project("업무").unwrap();
-        let t = s.add("회사 일", None, p2).unwrap();
-        s.add("하위", Some(t), p2).unwrap();
+        let t = s.add_todo("회사 일", None, p2).unwrap();
+        s.add_todo("하위", Some(t), p2).unwrap();
         s.delete_project(p2).unwrap();
-        assert!(s.list_all().unwrap().is_empty());
+        assert!(s.list_all_todos().unwrap().is_empty());
         assert_eq!(s.list_projects().unwrap().len(), 1);
         assert_eq!(s.list_projects().unwrap()[0].id, p1);
     }
@@ -825,20 +850,21 @@ mod tests {
     fn replace_all_restores_snapshot() {
         let s = mem_store();
         let pid = default_project(&s);
-        let a = s.add("a", None, pid).unwrap();
-        s.add("a1", Some(a), pid).unwrap();
+        let a = s.add_todo("a", None, pid).unwrap();
+        s.add_todo("a1", Some(a), pid).unwrap();
 
         let projects = s.list_projects().unwrap();
-        let todos = s.list_all().unwrap();
+        let todos = s.list_all_todos().unwrap();
 
-        s.delete(a).unwrap();
+        s.delete_todo(a).unwrap();
         s.add_project("임시").unwrap();
-        assert!(s.list(pid).unwrap().is_empty());
+        assert!(s.list_todos(pid).unwrap().is_empty());
 
         let data_version = s.data_version().unwrap();
-        assert!(
-            s.replace_all_if_unchanged(&projects, &todos, data_version)
-                .unwrap()
+        assert_eq!(
+            s.restore_if_unchanged(&projects, &todos, data_version)
+                .unwrap(),
+            RestoreOutcome::Restored
         );
         assert_eq!(texts(&s, pid), ["a", "a1"]);
         assert_eq!(s.list_projects().unwrap(), projects);
@@ -848,18 +874,18 @@ mod tests {
     fn replace_all_handles_parent_with_larger_id() {
         let s = mem_store();
         let pid = default_project(&s);
-        let a = s.add("a", None, pid).unwrap();
-        let b = s.add("b", None, pid).unwrap();
-        // b를 위로 올린 뒤 a를 그 밑에 넣으면 부모(b) id가 자식(a)보다 커진다.
-        s.set_positions(&[b, a]).unwrap();
-        s.indent(a, b, true).unwrap();
+        let a = s.add_todo("a", None, pid).unwrap();
+        let b = s.add_todo("b", None, pid).unwrap();
+        s.set_todo_positions(&[b, a]).unwrap();
+        s.indent(a, b, ParentCompletion::Reopen).unwrap();
 
         let projects = s.list_projects().unwrap();
-        let todos = s.list_all().unwrap();
+        let todos = s.list_all_todos().unwrap();
         let data_version = s.data_version().unwrap();
-        assert!(
-            s.replace_all_if_unchanged(&projects, &todos, data_version)
-                .unwrap()
+        assert_eq!(
+            s.restore_if_unchanged(&projects, &todos, data_version)
+                .unwrap(),
+            RestoreOutcome::Restored
         );
         assert_eq!(texts(&s, pid), ["b", "a"]);
     }

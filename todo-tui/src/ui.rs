@@ -9,6 +9,7 @@ use tui_input::Input;
 
 use crate::app::{App, Mode};
 use crate::db::Todo;
+use crate::tree::{self, ChildProgress};
 
 const HELP_GROUPS: &[&[&str]] = &[
     &[
@@ -39,7 +40,7 @@ const HELP_GROUPS: &[&[&str]] = &[
     ],
 ];
 
-pub(crate) fn ui(f: &mut Frame, app: &mut App) {
+pub(crate) fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
     let inner = area.width.saturating_sub(2);
@@ -54,11 +55,10 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App) {
     .areas(area);
 
     f.render_widget(title_bar(app), top);
-    f.render_stateful_widget(todo_list(app, mid.width), mid, &mut app.state);
+    f.render_stateful_widget(todo_list(app, mid.width), mid, &mut app.list_state);
     f.render_widget(bottom, bot);
 
-    // 편집 중일 때만 실제 터미널 커서를 입력 위치에 둔다(네이티브 커서·한글 조합).
-    let editing = if let Some(popup) = &app.popup {
+    let active_input = if let Some(popup) = &app.popup {
         let area = centered_rect(60, 3, f.area());
         f.render_widget(Clear, area);
         f.render_widget(
@@ -71,14 +71,14 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App) {
     } else {
         None
     };
-    if let Some((area, input)) = editing {
+    if let Some((area, input)) = active_input {
         f.set_cursor_position(input_cursor(area, input));
     }
 }
 
-/// 입력 박스 내부 폭(테두리 2 + 커서 여유 1 제외).
 fn input_inner_width(box_width: u16) -> usize {
-    box_width.saturating_sub(3) as usize
+    const BORDERS_AND_CURSOR_WIDTH: u16 = 3;
+    box_width.saturating_sub(BORDERS_AND_CURSOR_WIDTH) as usize
 }
 
 fn input_cursor(area: Rect, input: &Input) -> Position {
@@ -100,8 +100,7 @@ fn title_bar(app: &App) -> Paragraph<'static> {
 
     let mut spans = vec![" To-Do ".cyan().bold()];
     for (i, p) in app.projects.iter().enumerate() {
-        // 개수는 선택된 프로젝트 것이므로 그 탭 안에 붙인다.
-        spans.push(if p.id == app.project_id {
+        spans.push(if p.id == app.active_project_id {
             format!(" {} {} ({top_level}개) ", i + 1, p.name)
                 .cyan()
                 .bold()
@@ -120,23 +119,12 @@ fn title_bar(app: &App) -> Paragraph<'static> {
 }
 
 fn todo_list(app: &App, width: u16) -> List<'static> {
-    // 좌우 테두리(2) + 선택 표시 "▶ "(2)를 뺀 실제 내용 폭
-    let inner = width.saturating_sub(4) as usize;
+    const BORDERS_AND_HIGHLIGHT_SYMBOL_WIDTH: u16 = 4;
+    let content_width = width.saturating_sub(BORDERS_AND_HIGHLIGHT_SYMBOL_WIDTH) as usize;
     let items: Vec<ListItem> = app
         .visible
         .iter()
-        .map(|&i| {
-            let t = &app.todos[i];
-            let depth = app.depth_of(t.id);
-            let (done, total) = app.children_done(t.id);
-            let is_last = t.parent_id.is_some_and(|pid| {
-                app.todos
-                    .iter()
-                    .rfind(|c| c.parent_id == Some(pid))
-                    .is_some_and(|c| c.id == t.id)
-            });
-            todo_line(t, depth, is_last, done, total, inner)
-        })
+        .map(|&i| todo_item(app, &app.todos[i], content_width))
         .collect();
 
     List::new(items)
@@ -200,56 +188,60 @@ fn wrap_commands(groups: &[&[&str]], width: u16) -> Vec<Line<'static>> {
     lines
 }
 
-/// 깊이에 따라 들여쓰고, 자식이 있으면 접힘 캐럿과 (완료/전체) 배지를 붙인다.
-fn todo_line(
-    t: &Todo,
-    depth: usize,
-    is_last: bool,
-    done_children: usize,
-    total_children: usize,
-    width: usize,
-) -> ListItem<'static> {
-    let has_children = total_children > 0;
+fn todo_item(app: &App, todo: &Todo, width: usize) -> ListItem<'static> {
+    let depth = app.depth_of(todo.id);
+    let progress = tree::child_progress(&app.todos, todo.id);
+    let has_children = progress.total > 0;
     let mut prefix = Vec::new();
 
-    if depth > 0 {
-        let branch = if is_last { "└ " } else { "├ " };
+    if let Some(parent_id) = todo.parent_id {
+        let is_last_sibling = app
+            .todos
+            .iter()
+            .rfind(|c| c.parent_id == Some(parent_id))
+            .is_some_and(|c| c.id == todo.id);
+        let branch = if is_last_sibling { "└ " } else { "├ " };
         prefix.push(format!("{}{branch}", "    ".repeat(depth)).dim());
     }
     if has_children {
-        let caret = if t.collapsed { "▸ " } else { "▾ " };
+        let caret = if todo.collapsed { "▸ " } else { "▾ " };
         prefix.push(caret.dim());
     } else if depth == 0 {
         prefix.push(Span::raw("  "));
     }
 
-    prefix.push(checkbox(t.done));
-    prefix.push(timestamp_badge(t.created_at_string()));
+    prefix.push(checkbox(todo.done));
+    prefix.push(format!(" {} ", todo.created_at_string()).dim());
     prefix.push(Span::raw(" "));
 
     let mut suffix = Vec::new();
     if has_children {
-        let badge = format!("  ({done_children}/{total_children})");
-        suffix.push(if done_children == total_children {
-            badge.green()
-        } else {
-            badge.dim()
-        });
+        suffix.push(progress_badge(progress));
     }
-    wrapped_item(prefix, &t.text, content_style(t.done), suffix, width)
+    ListItem::new(wrapped_lines(
+        prefix,
+        &todo.text,
+        content_style(todo.done),
+        suffix,
+        width,
+    ))
 }
 
-fn wrapped_item(
-    prefix: Vec<Span<'static>>,
-    text: &str,
-    text_style: Style,
-    suffix: Vec<Span<'static>>,
-    width: usize,
-) -> ListItem<'static> {
-    ListItem::new(wrapped_lines(prefix, text, text_style, suffix, width))
+fn progress_badge(ChildProgress { done, total }: ChildProgress) -> Span<'static> {
+    let badge = format!("  ({done}/{total})");
+    if done == total {
+        badge.green()
+    } else {
+        badge.dim()
+    }
 }
 
-/// 내용이 폭을 넘으면 줄바꿈하고, 이어지는 줄은 텍스트 시작 위치에 맞춰 들여쓴다.
+fn spans_width(spans: &[Span]) -> usize {
+    use unicode_width::UnicodeWidthStr;
+
+    spans.iter().map(|s| s.content.as_ref().width()).sum()
+}
+
 fn wrapped_lines(
     prefix: Vec<Span<'static>>,
     text: &str,
@@ -257,9 +249,7 @@ fn wrapped_lines(
     suffix: Vec<Span<'static>>,
     width: usize,
 ) -> Vec<Line<'static>> {
-    use unicode_width::UnicodeWidthStr;
-
-    let prefix_w: usize = prefix.iter().map(|s| s.content.as_ref().width()).sum();
+    let prefix_w = spans_width(&prefix);
     let avail = width.saturating_sub(prefix_w).max(8);
     let chunks = wrap_width(text, avail);
 
@@ -275,10 +265,10 @@ fn wrapped_lines(
     }
 
     if !suffix.is_empty() {
-        let suffix_w: usize = suffix.iter().map(|s| s.content.as_ref().width()).sum();
-        let last = lines.last_mut().unwrap();
-        let last_w: usize = last.spans.iter().map(|s| s.content.as_ref().width()).sum();
-        if last_w + suffix_w <= width {
+        let suffix_w = spans_width(&suffix);
+        if let Some(last) = lines.last_mut()
+            && spans_width(&last.spans) + suffix_w <= width
+        {
             last.spans.extend(suffix);
         } else {
             let mut spans = vec![Span::raw(" ".repeat(prefix_w))];
@@ -289,13 +279,12 @@ fn wrapped_lines(
     lines
 }
 
-/// 표시 폭 기준 줄바꿈(textwrap). 공백 단위로 자르되, 한 단어가 폭보다 길면 글자 단위로 자른다.
 fn wrap_width(text: &str, width: usize) -> Vec<String> {
     use textwrap::{Options, WordSeparator, WordSplitter};
 
-    // 기본 unicode-linebreak 규칙은 한글을 음절 단위로 끊으므로 공백 기준으로 고정한다.
+    let keep_hangul_words_whole = WordSeparator::AsciiSpace;
     let options = Options::new(width.max(1))
-        .word_separator(WordSeparator::AsciiSpace)
+        .word_separator(keep_hangul_words_whole)
         .word_splitter(WordSplitter::NoHyphenation);
     textwrap::wrap(text, options)
         .into_iter()
@@ -305,10 +294,6 @@ fn wrap_width(text: &str, width: usize) -> Vec<String> {
 
 fn checkbox(done: bool) -> Span<'static> {
     if done { "[x] ".green() } else { "[ ] ".dim() }
-}
-
-fn timestamp_badge(ts: String) -> Span<'static> {
-    format!(" {ts} ").dim()
 }
 
 fn content_style(done: bool) -> Style {
@@ -355,9 +340,7 @@ mod tests {
             wrap_width("본인인증 완료되면 이벤트 소싱", 10),
             vec!["본인인증", "완료되면", "이벤트", "소싱"]
         );
-        // 공백 없는 긴 단어는 글자 단위로 잘림 (한글은 폭 2)
         assert_eq!(wrap_width("가나다라마", 4), vec!["가나", "다라", "마"]);
-        // 표시 폭이 넘치는 줄이 없어야 함
         use unicode_width::UnicodeWidthStr;
         for line in wrap_width("이벤트 소싱 카산드라 DB에서 PSQL로 마이그레이션", 12)
         {
@@ -376,11 +359,9 @@ mod tests {
             12,
         );
         let texts: Vec<String> = lines.iter().map(line_text).collect();
-        // 첫 줄은 프리픽스, 이후 줄은 같은 폭의 공백 들여쓰기
         assert!(texts.len() > 1);
         assert_eq!(texts[0], "  [ ] aaaa");
         assert!(texts[1].starts_with("      bbbb"));
-        // 진행도 배지는 잘리지 않고 마지막 줄(또는 새 줄)에 표시됨
         assert!(texts.last().unwrap().contains("(1/2)"));
     }
 

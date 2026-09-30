@@ -14,12 +14,13 @@ pub(crate) enum Action {
     Reorder(isize),
     Indent,
     Outdent,
-    Collapse(bool),
+    Collapse,
+    Expand,
     ToggleDone,
     Delete,
     Undo,
     Yank,
-    ProjectSelect(usize),
+    SelectProject(usize),
     MoveProject(isize),
     MoveToProject(isize),
     OpenEdit,
@@ -37,7 +38,6 @@ pub(crate) enum Flow {
     Quit,
 }
 
-/// 키 입력을 텍스트 편집 요청으로 변환한다(커서 이동·단어 삭제 포함).
 fn edit_request(key: KeyEvent) -> Option<InputRequest> {
     use InputRequest::*;
 
@@ -77,7 +77,6 @@ pub(crate) fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
         };
     }
 
-    // Tab을 누른 채 ←→: 선택한 메모를 옆 탭으로 보낸다. 탭 전환은 숫자 1~5.
     if app.tab_held {
         return match key.code {
             Left => Some(MoveToProject(-1)),
@@ -86,20 +85,19 @@ pub(crate) fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
         };
     }
 
-    // 입력 중(내용이 있을 때)에는 ←→ 를 커서 이동에 양보한다.
-    let editing = app.mode == Mode::Insert && !app.input.value().is_empty();
+    let arrows_move_cursor = app.mode == Mode::Insert && !app.input.value().is_empty();
 
     let nav = match key.code {
         Left if ctrl && shift => Some(MoveToProject(-1)),
         Right if ctrl && shift => Some(MoveToProject(1)),
         Up if shift => Some(Reorder(-1)),
         Down if shift => Some(Reorder(1)),
-        Left if shift && !editing => Some(Indent),
-        Right if shift && !editing => Some(Outdent),
+        Left if shift && !arrows_move_cursor => Some(Indent),
+        Right if shift && !arrows_move_cursor => Some(Outdent),
         Up => Some(Select(-1)),
         Down => Some(Select(1)),
-        Left if !editing => Some(Collapse(true)),
-        Right if !editing => Some(Collapse(false)),
+        Left if !arrows_move_cursor => Some(Collapse),
+        Right if !arrows_move_cursor => Some(Expand),
         _ => None,
     };
     if nav.is_some() {
@@ -127,12 +125,12 @@ pub(crate) fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
             Char('>' | '.') => MoveToProject(1),
             Char('{' | '[') => MoveProject(-1),
             Char('}' | ']') => MoveProject(1),
-            Char(c @ '1'..='5') => ProjectSelect(c as usize - '1' as usize),
+            Char(c @ '1'..='5') => SelectProject(c as usize - '1' as usize),
             Char(' ') => ToggleDone,
             Char('j') => Select(1),
             Char('k') => Select(-1),
-            Char('l') => Collapse(false),
-            Char('h') => Collapse(true),
+            Char('l') => Expand,
+            Char('h') => Collapse,
             _ => return None,
         }),
     }

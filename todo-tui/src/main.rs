@@ -5,8 +5,11 @@ mod clipboard;
 mod db;
 mod dialog;
 mod error;
+mod tree;
 mod ui;
 mod undo;
+
+use std::time::Duration;
 
 use clap::Parser;
 use ratatui::{
@@ -26,7 +29,6 @@ use action::{Flow, map_key};
 use app::App;
 use cli::Cli;
 use db::Store;
-use ui::ui;
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -40,8 +42,8 @@ fn main() -> anyhow::Result<()> {
 
     let mut terminal = ratatui::init();
 
-    let enhanced = supports_keyboard_enhancement().unwrap_or(false);
-    if enhanced {
+    let keyboard_enhanced = supports_keyboard_enhancement().unwrap_or(false);
+    if keyboard_enhanced {
         let _ = execute!(
             std::io::stdout(),
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
@@ -49,25 +51,23 @@ fn main() -> anyhow::Result<()> {
     }
     let _ = execute!(std::io::stdout(), SetCursorStyle::BlinkingBar);
 
-    let result = run(&mut terminal, &mut app);
+    let result = run_tui(&mut terminal, &mut app);
 
     let _ = execute!(std::io::stdout(), SetCursorStyle::DefaultUserShape);
-    if enhanced {
+    if keyboard_enhanced {
         let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
     }
     ratatui::restore();
     result
 }
 
-fn run(terminal: &mut DefaultTerminal, app: &mut App) -> anyhow::Result<()> {
-    use std::time::Duration;
-
-    let poll_interval = Duration::from_secs(1);
+fn run_tui(terminal: &mut DefaultTerminal, app: &mut App) -> anyhow::Result<()> {
+    const EXTERNAL_CHANGE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
     loop {
-        terminal.draw(|f| ui(f, app))?;
+        terminal.draw(|frame| ui::render(frame, app))?;
 
-        if !event::poll(poll_interval)? {
+        if !event::poll(EXTERNAL_CHANGE_POLL_INTERVAL)? {
             app.sync()?;
             continue;
         }
@@ -79,8 +79,7 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> anyhow::Result<()> {
             continue;
         }
         if key.code == KeyCode::Tab {
-            app.tab_held = true;
-            app.status = "←→ 메모를 옆 탭으로 보내기 · 다른 키를 누르면 해제".to_string();
+            app.hold_tab();
             continue;
         }
         if app.tab_held && !matches!(key.code, KeyCode::Left | KeyCode::Right) {
