@@ -10,7 +10,9 @@ workspace = true
 [dependencies]
 anyhow = "1.0.103"
 clap = { version = "4", features = ["derive"] }
+dirs = "6"
 ratatui = "0.30"
+rusqlite = { version = "0.40", features = ["bundled"] }
 similar = { version = "2.7.0", default-features = false }
 two-face = "0.5.2"
 unicode-segmentation = "1.13"

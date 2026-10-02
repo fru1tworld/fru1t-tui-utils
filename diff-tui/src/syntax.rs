@@ -15,18 +15,9 @@ use two_face::re_exports::syntect::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::{git::escape_controls, wrap::Code};
+use crate::{appearance::Appearance, git::escape_controls, wrap::Code};
 
 const PLAIN_TEXT: &str = "Plain Text";
-
-const BRACKET_COLORS: [Color; 6] = [
-    Color::Rgb(235, 203, 139),
-    Color::Rgb(180, 142, 173),
-    Color::Rgb(136, 192, 208),
-    Color::Rgb(208, 135, 112),
-    Color::Rgb(129, 161, 193),
-    Color::Rgb(163, 190, 140),
-];
 
 const NON_CODE_SCOPES: [&str; 2] = ["comment", "string"];
 const FUNCTION_DECLARATION_SCOPES: [&str; 2] = ["entity.name.function", "entity.type.function"];
@@ -45,7 +36,7 @@ const TYPE_DECLARATION_SCOPES: [&str; 9] = [
 
 pub struct SyntaxEngine {
     syntaxes: SyntaxSet,
-    theme: Theme,
+    themes: [Theme; 2],
 }
 
 #[derive(Default)]
@@ -57,10 +48,18 @@ pub struct HighlightedSource {
 impl SyntaxEngine {
     pub fn shared() -> &'static Self {
         static ENGINE: OnceLock<SyntaxEngine> = OnceLock::new();
-        ENGINE.get_or_init(|| Self {
-            syntaxes: two_face::syntax::extra_newlines(),
-            theme: two_face::theme::extra()[two_face::theme::EmbeddedThemeName::Nord].clone(),
+        ENGINE.get_or_init(|| {
+            let themes = two_face::theme::extra();
+            Self {
+                syntaxes: two_face::syntax::extra_newlines(),
+                themes: Appearance::ALL
+                    .map(|appearance| themes[appearance.palette().syntax].clone()),
+            }
         })
+    }
+
+    fn theme(&self, appearance: Appearance) -> &Theme {
+        &self.themes[appearance as usize]
     }
 
     fn syntax(&self, path: &Path, first_line: &str) -> &SyntaxReference {
@@ -85,13 +84,15 @@ impl SyntaxEngine {
         path: &Path,
         source: &str,
         wanted_lines: &BTreeSet<usize>,
+        appearance: Appearance,
     ) -> Result<HighlightedSource> {
         let mut result = HighlightedSource::default();
         let Some(&last_wanted) = wanted_lines.last() else {
             return Ok(result);
         };
         let syntax = self.syntax(path, source.lines().next().unwrap_or_default());
-        let highlighter = Highlighter::new(&self.theme);
+        let highlighter = Highlighter::new(self.theme(appearance));
+        let brackets = &appearance.palette().brackets;
         let mut highlight_state = HighlightState::new(&highlighter, ScopeStack::new());
         let mut parser = ParseState::new(syntax);
         let mut scopes = ScopeStack::new();
@@ -143,7 +144,7 @@ impl SyntaxEngine {
                             }
                             spans.push(Span::styled(
                                 escape_controls(grapheme),
-                                span_style.fg(BRACKET_COLORS[depth % BRACKET_COLORS.len()]),
+                                span_style.fg(brackets[depth % brackets.len()]),
                             ));
                             plain_start = offset + grapheme.len();
                         }
@@ -237,7 +238,12 @@ mod tests {
             "}\n",
         );
         let result = SyntaxEngine::shared()
-            .highlight(Path::new("client.kt"), source, &BTreeSet::from([9, 13]))
+            .highlight(
+                Path::new("client.kt"),
+                source,
+                &BTreeSet::from([9, 13]),
+                Appearance::Dark,
+            )
             .unwrap();
         assert_eq!(result.enclosing_functions[&9], "private fun approve() {");
         assert!(!result.enclosing_functions.contains_key(&13));
@@ -249,7 +255,7 @@ mod tests {
         let wanted = BTreeSet::from([4, 6]);
         let source = "/*\nfirst\nsecond\nfn actually_a_comment() {}\n*/\nfn actual_code() {}\n";
         let result = engine
-            .highlight(Path::new("main.rs"), source, &wanted)
+            .highlight(Path::new("main.rs"), source, &wanted, Appearance::Dark)
             .unwrap();
         let comment = result.lines[&4].wrap(100);
         let code = result.lines[&6].wrap(100);

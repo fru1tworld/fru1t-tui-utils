@@ -5,6 +5,7 @@ use ratatui::{
 };
 
 use crate::{
+    appearance::Appearance,
     diff_view::DiffDisplay,
     file_tree::{Entry, EntryKind, FileTree, FolderState, TreeCursor},
     git::{Change, ChangeIndex, DiffLine, Mode, Repository, Snapshot, Whitespace, escape_controls},
@@ -336,6 +337,19 @@ impl App {
         self.invalidate_pending_refresh();
     }
 
+    pub fn set_appearance(&mut self, appearance: Appearance) {
+        if self.display.appearance == appearance {
+            return;
+        }
+        let line = self.display.line_at_row(self.scroll);
+        let rows_into_line = self.scroll.saturating_sub(self.display.row_of_line(line));
+        self.display.appearance = appearance;
+        let change = self.selected().cloned();
+        self.rebuild_display(change.as_ref());
+        self.display.layout(self.diff_width);
+        self.scroll = (self.display.row_of_line(line) + rows_into_line).min(self.max_scroll());
+    }
+
     fn move_file(&mut self, delta: isize) -> Result<()> {
         let Some(last) = self.visible.len().checked_sub(1) else {
             return Ok(());
@@ -555,6 +569,7 @@ impl App {
                 self.test_files = self.test_files.toggled();
                 self.refilter()?;
             }
+            KeyCode::Char('T') => self.set_appearance(self.display.appearance.toggled()),
             KeyCode::Char('/') => {
                 self.focus = Focus::Files;
                 self.searching = true;

@@ -5,12 +5,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ratatui::{
-    style::{Color, Style},
-    text::Line,
-};
+use ratatui::{style::Style, text::Line};
 
 use crate::{
+    appearance::Appearance,
     git::{Change, DiffLine, LineKind, Sources},
     matching::{align_lines, changed_words},
     syntax::{HighlightedSource, SyntaxEngine},
@@ -143,6 +141,7 @@ pub struct DiffDisplay {
     pub mode: ViewMode,
     pub indentation: Indentation,
     pub guides: IndentGuides,
+    pub appearance: Appearance,
     pub rows: Vec<Row>,
     pub language: String,
     lines: Vec<PreparedLine>,
@@ -169,11 +168,12 @@ impl DiffDisplay {
     ) -> Option<String> {
         self.clear();
         let engine = SyntaxEngine::shared();
+        let appearance = self.appearance;
         self.language = engine.language(&change.path);
         let mut warning = None;
         let mut highlight =
             |path: &Path, source: Option<&str>, numbers: BTreeSet<usize>| match source
-                .map(|source| engine.highlight(path, source, &numbers))
+                .map(|source| engine.highlight(path, source, &numbers, appearance))
                 .transpose()
             {
                 Ok(highlighted) => highlighted.unwrap_or_default(),
@@ -405,12 +405,13 @@ impl DiffDisplay {
             &self.lines[added].after.text,
             deadline,
         );
+        let palette = self.appearance.palette();
         self.lines[removed]
             .before
-            .emphasize(&old, Style::new().bg(Color::Rgb(100, 44, 54)).bold());
+            .emphasize(&old, Style::new().bg(palette.removed_word).bold());
         self.lines[added]
             .after
-            .emphasize(&new, Style::new().bg(Color::Rgb(40, 88, 59)).bold());
+            .emphasize(&new, Style::new().bg(palette.added_word).bold());
     }
 }
 

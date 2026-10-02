@@ -445,7 +445,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "dirs",
  "ratatui",
+ "rusqlite",
  "similar",
  "two-face",
  "unicode-segmentation",

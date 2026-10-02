@@ -1,4 +1,5 @@
 mod app;
+mod appearance;
 mod diff_view;
 mod file_tree;
 mod git;
@@ -6,6 +7,7 @@ mod git;
 mod git_tests;
 mod matching;
 mod refresh;
+mod settings;
 mod syntax;
 mod ui;
 mod wrap;
@@ -23,6 +25,7 @@ use crate::{
     app::{App, KeyOutcome, TestFiles},
     diff_view::ViewMode,
     git::{Mode, Repository, escape_controls},
+    settings::Settings,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -33,7 +36,7 @@ const MAX_INPUT_WAIT: Duration = Duration::from_millis(250);
 #[command(
     version,
     about = "Review Git diffs with test files hidden by default",
-    after_help = "Examples:\n  diff-tui                     Side-by-side working changes against HEAD\n  diff-tui main                Compare main with the current HEAD\n  diff-tui main feature        Compare two branch tips without checkout\n  diff-tui --unified           Start in unified view\n  diff-tui --unstaged          Same comparison as git diff\n  diff-tui --staged            Same comparison as git diff --cached\n  diff-tui -C /path/to/repo     Review another repository\n\nIn the TUI: v switches views, b selects branches, w returns to working changes, t toggles tests."
+    after_help = "Examples:\n  diff-tui                     Side-by-side working changes against HEAD\n  diff-tui main                Compare main with the current HEAD\n  diff-tui main feature        Compare two branch tips without checkout\n  diff-tui --unified           Start in unified view\n  diff-tui --unstaged          Same comparison as git diff\n  diff-tui --staged            Same comparison as git diff --cached\n  diff-tui -C /path/to/repo     Review another repository\n\nIn the TUI: v switches views, b selects branches, w returns to working changes, t toggles tests, T toggles dark/light theme."
 )]
 struct Cli {
     /// Branches, tags, or commits to compare; TO defaults to HEAD
@@ -90,13 +93,30 @@ fn main() -> Result<()> {
     if cli.unified {
         app.display.mode = ViewMode::Unified;
     }
+    let settings = Settings::open_default().and_then(|settings| {
+        if let Some(appearance) = settings.appearance()? {
+            app.set_appearance(appearance);
+        }
+        Ok(settings)
+    });
+    let settings = match settings {
+        Ok(settings) => Some(settings),
+        Err(error) => {
+            app.error = Some(escape_controls(&format!("{error:#}")));
+            None
+        }
+    };
     let mut terminal = ratatui::try_init()?;
-    let result = run(&mut terminal, &mut app);
+    let result = run(&mut terminal, &mut app, settings.as_ref());
     ratatui::restore();
     result
 }
 
-fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
+fn run(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut App,
+    settings: Option<&Settings>,
+) -> Result<()> {
     let mut poller = refresh::Poller::new(app.repo.root.clone())?;
     let mut next_poll = Instant::now() + POLL_INTERVAL;
     loop {
@@ -119,10 +139,17 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
             && let Event::Key(key) = event::read()?
             && key.kind != KeyEventKind::Release
         {
+            let appearance = app.display.appearance;
             match app.handle(key) {
                 Ok(KeyOutcome::Quit) => return Ok(()),
                 Ok(KeyOutcome::Continue) => {}
                 Err(error) => app.error = Some(escape_controls(&format!("{error:#}"))),
+            }
+            if app.display.appearance != appearance
+                && let Some(settings) = settings
+                && let Err(error) = settings.save_appearance(app.display.appearance)
+            {
+                app.error = Some(escape_controls(&format!("Cannot save theme: {error:#}")));
             }
         }
     }

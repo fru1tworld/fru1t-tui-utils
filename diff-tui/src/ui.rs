@@ -10,6 +10,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{App, BranchPicker, Dialog, Focus},
+    appearance::Palette,
     diff_view::{Cell, Row, SPLIT_GUTTER, UNIFIED_GUTTER, ViewMode},
     file_tree::{Entry, EntryKind},
     git::{Change, ChangeStatus, LineKind, Whitespace, escape_controls},
@@ -19,7 +20,7 @@ const MIN_WIDTH: u16 = 40;
 const MIN_HEIGHT: u16 = 10;
 const SIDE_BY_SIDE_MIN_WIDTH: u16 = 90;
 const KEY_HINTS: &str = "v: view  Tab: expand/back  i: indent  I: guides  W: whitespace  n/p: file  /: search  ?: help  q: quit";
-const HELP: &str = "v / Tab       Switch view / expand code\nEnter         Open file / toggle folder\nLeft / Right  Folder navigation / code scroll\nj / k, arrows  Move in focused pane\nn / p         Next / previous file\nPgUp / PgDn   Page up / down\nCtrl-u / d    Half page up / down\ng / G         First / last\n[ / ]         Previous / next hunk\ni / I         Compact indent / indent guides\nW             Ignore whitespace on / off\nt             Show / hide tests\n/             Filter file paths\nb             Choose FROM, then TO branch\nw / s / u     Working / staged / unstaged\nr             Reload comparison\nq / Ctrl-c    Quit\nEsc / ?       Close help";
+const HELP: &str = "v / Tab       Switch view / expand code\nEnter         Open file / toggle folder\nLeft / Right  Folder navigation / code scroll\nj / k, arrows  Move in focused pane\nn / p         Next / previous file\nPgUp / PgDn   Page up / down\nCtrl-u / d    Half page up / down\ng / G         First / last\n[ / ]         Previous / next hunk\ni / I         Compact indent / indent guides\nW             Ignore whitespace on / off\nt             Show / hide tests\nT             Dark / light theme\n/             Filter file paths\nb             Choose FROM, then TO branch\nw / s / u     Working / staged / unstaged\nr             Reload comparison\nq / Ctrl-c    Quit\nEsc / ?       Close help";
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
@@ -99,9 +100,10 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect, path_lines: Vec<String>
             .dim(),
         ]),
         Line::from(format!(
-            "{}    [{}]{whitespace}",
+            "{}    [{}]  [{}]{whitespace}",
             escape_controls(&app.mode.label()),
             app.display.mode.label(),
+            app.display.appearance.label(),
         )),
     ];
     heading.extend(path_lines.into_iter().map(|line| Line::from(line).dim()));
@@ -143,7 +145,11 @@ fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect, empty_message: O
         .collect();
     let list = List::new(items)
         .block(block)
-        .highlight_style(Style::new().bg(Color::DarkGray).bold())
+        .highlight_style(
+            Style::new()
+                .bg(app.display.appearance.palette().selection)
+                .bold(),
+        )
         .highlight_symbol("> ");
     frame.render_stateful_widget(list, area, &mut app.tree.state);
 }
@@ -206,6 +212,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_dialog(frame: &mut Frame, app: &mut App, body: Rect) {
+    let selection = app.display.appearance.palette().selection;
     let Some(dialog) = &mut app.dialog else {
         return;
     };
@@ -215,11 +222,11 @@ fn draw_dialog(frame: &mut Frame, app: &mut App, body: Rect) {
         Dialog::Help => {
             frame.render_widget(Paragraph::new(HELP).block(panel(" Keys ", true)), area);
         }
-        Dialog::Branches(picker) => draw_branch_picker(frame, picker, area),
+        Dialog::Branches(picker) => draw_branch_picker(frame, picker, area, selection),
     }
 }
 
-fn draw_branch_picker(frame: &mut Frame, picker: &mut BranchPicker, area: Rect) {
+fn draw_branch_picker(frame: &mut Frame, picker: &mut BranchPicker, area: Rect, selection: Color) {
     let title = match &picker.from {
         Some(from) => format!(" TO branch (FROM: {}) ", escape_controls(from)),
         None => " FROM branch ".into(),
@@ -245,7 +252,7 @@ fn draw_branch_picker(frame: &mut Frame, picker: &mut BranchPicker, area: Rect) 
         items.push(ListItem::new("No matching branches"));
     }
     let list = List::new(items)
-        .highlight_style(Style::new().bg(Color::DarkGray).bold())
+        .highlight_style(Style::new().bg(selection).bold())
         .highlight_symbol("> ");
     frame.render_stateful_widget(list, choices, &mut picker.state);
     frame.render_widget(
@@ -361,20 +368,34 @@ fn render_code_panel(
     {
         if let Some(cell) = column(row) {
             let area = Rect::new(inner.x, inner.y + offset as u16, inner.width, 1);
-            render_cell(frame, cell, area, gutter, app.horizontal_scroll);
+            render_cell(
+                frame,
+                cell,
+                area,
+                gutter,
+                app.horizontal_scroll,
+                app.display.appearance.palette(),
+            );
         }
     }
 }
 
-fn render_cell(frame: &mut Frame, cell: &Cell, area: Rect, gutter: u16, horizontal_scroll: u16) {
+fn render_cell(
+    frame: &mut Frame,
+    cell: &Cell,
+    area: Rect,
+    gutter: u16,
+    horizontal_scroll: u16,
+    palette: &Palette,
+) {
     let [numbers, code] = Layout::horizontal([
         Constraint::Length(gutter.min(area.width)),
         Constraint::Min(0),
     ])
     .areas(area);
     let style = match cell.kind {
-        LineKind::Added => Style::new().bg(Color::Rgb(24, 48, 34)),
-        LineKind::Removed => Style::new().bg(Color::Rgb(54, 29, 35)),
+        LineKind::Added => Style::new().bg(palette.added),
+        LineKind::Removed => Style::new().bg(palette.removed),
         LineKind::Hunk => Style::new().cyan(),
         LineKind::Header => Style::new().dark_gray(),
         LineKind::Context => Style::default(),
