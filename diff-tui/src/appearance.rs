@@ -69,6 +69,13 @@ impl Appearance {
         }
     }
 
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Dark => "다크",
+            Self::Light => "라이트",
+        }
+    }
+
     pub fn from_label(label: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|theme| theme.label() == label)
     }

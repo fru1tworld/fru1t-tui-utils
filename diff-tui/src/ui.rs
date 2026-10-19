@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Clear, List, ListItem, Paragraph},
 };
+use tui_kit::layout::{KeyHint, key_hint_lines};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -19,24 +20,43 @@ use crate::{
 const MIN_WIDTH: u16 = 40;
 const MIN_HEIGHT: u16 = 10;
 const SIDE_BY_SIDE_MIN_WIDTH: u16 = 90;
-const KEY_HINTS: &str = "v: view  Tab: expand/back  i: indent  I: guides  W: whitespace  n/p: file  /: search  ?: help  q: quit";
-const HELP: &str = "v / Tab       Switch view / expand code\nEnter         Open file / toggle folder\nLeft / Right  Folder navigation / code scroll\nj / k, arrows  Move in focused pane\nn / p         Next / previous file\nPgUp / PgDn   Page up / down\nCtrl-u / d    Half page up / down\ng / G         First / last\n[ / ]         Previous / next hunk\ni / I         Compact indent / indent guides\nW             Ignore whitespace on / off\nt             Show / hide tests\nT             Dark / light theme\n/             Filter file paths\nb             Choose FROM, then TO branch\nw / s / u     Working / staged / unstaged\nr             Reload comparison\nq / Ctrl-c    Quit\nEsc / ?       Close help";
+const VIEW_HINTS: &[KeyHint] = &[
+    ("v", "보기"),
+    ("Tab", "펼치기/돌아가기"),
+    ("i", "들여쓰기"),
+    ("I", "가이드"),
+    ("W", "공백"),
+    ("n/p", "파일"),
+    ("/", "검색"),
+    ("?", "도움말"),
+    ("q", "종료"),
+];
+const COMPARISON_HINTS: &[KeyHint] = &[
+    ("w", "작업 트리"),
+    ("s", "스테이징"),
+    ("u", "언스테이징"),
+    ("r", "다시 읽기"),
+];
+const HELP: &str = "v / Tab       보기 전환 / 코드 펼치기\nEnter         파일 열기 / 폴더 접기·펼치기\nLeft / Right  폴더 이동 / 코드 가로 스크롤\nj / k, 화살표  현재 창에서 이동\nn / p         다음 / 이전 파일\nPgUp / PgDn   한 페이지 위 / 아래\nCtrl-u / d    반 페이지 위 / 아래\ng / G         처음 / 끝\n[ / ]         이전 / 다음 hunk\ni / I         들여쓰기 압축 / 들여쓰기 가이드\nW             공백 무시 켜기 / 끄기\nt             테스트 표시 / 숨기기\nT             다크 / 라이트 테마\n/             파일 경로 필터\nb             FROM, TO 브랜치 차례로 선택\nw / s / u     작업 트리 / 스테이징 / 언스테이징\nr             비교 다시 읽기\nq / Ctrl-c    종료\nEsc / ?       도움말 닫기";
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         frame.render_widget(
-            Paragraph::new("Resize terminal to at least 40 x 10.\nq: quit"),
+            Paragraph::new("터미널을 40 x 10 이상으로 늘려 주세요.\nq 종료"),
             area,
         );
         return;
     }
+    let footer_lines = footer_lines(app, area.width);
+    let footer_height = (footer_lines.len() as u16).min(area.height - 5);
     let path_lines = wrap_name(&focused_path(app), usize::from(area.width));
-    let header_height = (2 + path_lines.len()).min(usize::from(area.height - 5)) as u16;
+    let header_height =
+        (2 + path_lines.len()).min(usize::from(area.height - 3 - footer_height)) as u16;
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(header_height),
         Constraint::Min(3),
-        Constraint::Length(2),
+        Constraint::Length(footer_height),
     ])
     .areas(area);
     draw_header(frame, app, header, path_lines);
@@ -50,7 +70,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Focus::Diff => body,
     };
     draw_diff_pane(frame, app, diff, empty_message);
-    draw_footer(frame, app, footer);
+    frame.render_widget(Paragraph::new(footer_lines), footer);
     draw_dialog(frame, app, body);
 }
 
@@ -69,11 +89,11 @@ fn empty_message(app: &App) -> Option<&'static str> {
     if !app.visible.is_empty() {
         None
     } else if app.snapshot.changes.is_empty() {
-        Some("No changes in this comparison.")
+        Some("이 비교에는 변경 사항이 없습니다.")
     } else if !app.query.is_empty() {
-        Some("No matching files. Esc clears the search.")
+        Some("일치하는 파일이 없습니다. Esc로 검색을 지웁니다.")
     } else {
-        Some("All changed files are tests. Press t to show them.")
+        Some("변경된 파일이 모두 테스트입니다. t를 누르면 표시합니다.")
     }
 }
 
@@ -86,14 +106,14 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect, path_lines: Vec<String>
         .to_string_lossy();
     let whitespace = match app.whitespace {
         Whitespace::Compared => "",
-        Whitespace::Ignored => "  [ignore whitespace]",
+        Whitespace::Ignored => "  [공백 무시]",
     };
     let mut heading = vec![
         Line::from(vec![
             "diff-tui  ".cyan().bold(),
             Span::raw(escape_controls(&root)),
             format!(
-                "    {} files, {} tests hidden",
+                "    파일 {}개, 숨긴 테스트 {}개",
                 app.visible.len(),
                 app.hidden_test_count()
             )
@@ -103,7 +123,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect, path_lines: Vec<String>
             "{}    [{}]  [{}]{whitespace}",
             escape_controls(&app.mode.label()),
             app.display.mode.label(),
-            app.display.appearance.label(),
+            app.display.appearance.display_name(),
         )),
     ];
     heading.extend(path_lines.into_iter().map(|line| Line::from(line).dim()));
@@ -128,9 +148,9 @@ fn split_files_and_diff(body: Rect) -> [Rect; 2] {
 
 fn draw_file_list(frame: &mut Frame, app: &mut App, area: Rect, empty_message: Option<&str>) {
     let title = if app.query.is_empty() {
-        " Files (Tab: code) ".into()
+        " 파일 (Tab 코드) ".into()
     } else {
-        format!(" Files /{} ", escape_controls(&app.query))
+        format!(" 파일 /{} ", escape_controls(&app.query))
     };
     let block = panel(&title, true);
     if let Some(message) = empty_message {
@@ -161,8 +181,10 @@ fn draw_diff_pane(frame: &mut Frame, app: &mut App, area: Rect, empty_message: O
         frame.render_widget(Paragraph::new(message).block(block), area);
     } else if app.display.rows.is_empty() {
         let message = match app.whitespace {
-            Whitespace::Ignored => "No changes after ignoring whitespace. W shows all changes.",
-            Whitespace::Compared => "No diff content. Press r to refresh.",
+            Whitespace::Ignored => {
+                "공백을 무시하면 변경 사항이 없습니다. W를 누르면 모두 표시합니다."
+            }
+            Whitespace::Compared => "diff 내용이 없습니다. r을 누르면 다시 읽습니다.",
         };
         frame.render_widget(Paragraph::new(message).block(block), area);
     } else {
@@ -170,23 +192,31 @@ fn draw_diff_pane(frame: &mut Frame, app: &mut App, area: Rect, empty_message: O
     }
 }
 
-fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
+fn footer_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let status = if let Some(error) = app.error.as_ref().or(app.refresh_error.as_ref()) {
-        Line::from(error.as_str().red())
+        Some(Line::from(error.clone().red()))
     } else if app.searching {
-        Line::from(
+        Some(Line::from(
             format!(
-                "/{}  (type to filter, Enter: keep, Esc: clear)",
+                "/{}  (입력해 필터 · Enter 유지 · Esc 지우기)",
                 escape_controls(&app.query)
             )
             .yellow(),
-        )
+        ))
     } else {
-        Line::from(KEY_HINTS.dim())
+        None
+    };
+    let mut lines = match status {
+        Some(status) => {
+            let mut lines = vec![status];
+            lines.extend(key_hint_lines(&[COMPARISON_HINTS], width));
+            lines
+        }
+        None => key_hint_lines(&[VIEW_HINTS, COMPARISON_HINTS], width),
     };
     let position = match app.focus {
         Focus::Files => format!(
-            "item {}/{}",
+            "항목 {}/{}",
             app.tree.state.selected().map_or(0, |index| index + 1),
             app.tree.entries.len()
         ),
@@ -196,19 +226,11 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 app.scroll + 1
             };
-            format!("row {row}/{}", app.display.rows.len())
+            format!("행 {row}/{}", app.display.rows.len())
         }
     };
-    frame.render_widget(
-        Paragraph::new(vec![
-            status,
-            Line::from(format!(
-                "w: working  s: staged  u: unstaged  r: refresh  auto: 1s    {position}",
-            ))
-            .dim(),
-        ]),
-        area,
-    );
+    lines.push(Line::from(format!("자동 새로고침 1초 · {position}")).dim());
+    lines
 }
 
 fn draw_dialog(frame: &mut Frame, app: &mut App, body: Rect) {
@@ -220,7 +242,7 @@ fn draw_dialog(frame: &mut Frame, app: &mut App, body: Rect) {
     frame.render_widget(Clear, area);
     match dialog {
         Dialog::Help => {
-            frame.render_widget(Paragraph::new(HELP).block(panel(" Keys ", true)), area);
+            frame.render_widget(Paragraph::new(HELP).block(panel(" 키 ", true)), area);
         }
         Dialog::Branches(picker) => draw_branch_picker(frame, picker, area, selection),
     }
@@ -228,8 +250,8 @@ fn draw_dialog(frame: &mut Frame, app: &mut App, body: Rect) {
 
 fn draw_branch_picker(frame: &mut Frame, picker: &mut BranchPicker, area: Rect, selection: Color) {
     let title = match &picker.from {
-        Some(from) => format!(" TO branch (FROM: {}) ", escape_controls(from)),
-        None => " FROM branch ".into(),
+        Some(from) => format!(" TO 브랜치 (FROM: {}) ", escape_controls(from)),
+        None => " FROM 브랜치 ".into(),
     };
     let block = panel(&title, true);
     let inner = block.inner(area);
@@ -241,7 +263,7 @@ fn draw_branch_picker(frame: &mut Frame, picker: &mut BranchPicker, area: Rect, 
     ])
     .areas(inner);
     frame.render_widget(
-        Paragraph::new(format!("Search: {}", escape_controls(&picker.query))).yellow(),
+        Paragraph::new(format!("검색: {}", escape_controls(&picker.query))).yellow(),
         input,
     );
     let mut items: Vec<_> = picker
@@ -249,14 +271,14 @@ fn draw_branch_picker(frame: &mut Frame, picker: &mut BranchPicker, area: Rect, 
         .map(|name| ListItem::new(escape_controls(name)))
         .collect();
     if items.is_empty() {
-        items.push(ListItem::new("No matching branches"));
+        items.push(ListItem::new("일치하는 브랜치가 없습니다"));
     }
     let list = List::new(items)
         .highlight_style(Style::new().bg(selection).bold())
         .highlight_symbol("> ");
     frame.render_stateful_widget(list, choices, &mut picker.state);
     frame.render_widget(
-        Paragraph::new("Type: filter  Up/Down: select  Enter: choose  Esc: cancel").dim(),
+        Paragraph::new("입력 필터  ↑↓ 이동  Enter 선택  Esc 취소").dim(),
         hint,
     );
 }
@@ -325,7 +347,7 @@ fn render_diff(frame: &mut Frame, app: &App, area: Rect) {
                 before,
                 |row| row.left.as_ref(),
                 SPLIT_GUTTER,
-                &format!(" Before | {language} "),
+                &format!(" 변경 전 | {language} "),
             );
             render_code_panel(
                 frame,
@@ -333,7 +355,7 @@ fn render_diff(frame: &mut Frame, app: &App, area: Rect) {
                 after,
                 |row| row.right.as_ref(),
                 SPLIT_GUTTER,
-                &format!(" After | {language} "),
+                &format!(" 변경 후 | {language} "),
             );
         }
         ViewMode::Unified => render_code_panel(
@@ -342,7 +364,7 @@ fn render_diff(frame: &mut Frame, app: &App, area: Rect) {
             area,
             |row| row.left.as_ref(),
             UNIFIED_GUTTER,
-            &format!(" Unified | {language} "),
+            &format!(" 통합 | {language} "),
         ),
     }
 }
@@ -437,6 +459,22 @@ fn popup(area: Rect) -> Rect {
     )
 }
 
+/// Screen contents as one string, skipping the filler cell after each wide character.
+#[cfg(test)]
+pub fn screen_text(buffer: &ratatui::buffer::Buffer) -> String {
+    let mut text = String::new();
+    let mut skip = 0;
+    for cell in &buffer.content {
+        if skip > 0 {
+            skip -= 1;
+            continue;
+        }
+        text.push_str(cell.symbol());
+        skip = cell.symbol().width().saturating_sub(1);
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,14 +507,8 @@ mod tests {
         }
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        let text: String = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
-        assert!(text.contains("No changes in this comparison."));
+        let text = screen_text(terminal.backend().buffer());
+        assert!(text.contains("이 비교에는 변경 사항이 없습니다."));
     }
 
     #[test]

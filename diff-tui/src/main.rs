@@ -35,26 +35,26 @@ const MAX_INPUT_WAIT: Duration = Duration::from_millis(250);
 #[derive(Parser, Debug)]
 #[command(
     version,
-    about = "Review Git diffs with test files hidden by default",
-    after_help = "Examples:\n  diff-tui                     Side-by-side working changes against HEAD\n  diff-tui main                Compare main with the current HEAD\n  diff-tui main feature        Compare two branch tips without checkout\n  diff-tui --unified           Start in unified view\n  diff-tui --unstaged          Same comparison as git diff\n  diff-tui --staged            Same comparison as git diff --cached\n  diff-tui -C /path/to/repo     Review another repository\n\nIn the TUI: v switches views, b selects branches, w returns to working changes, t toggles tests, T toggles dark/light theme."
+    about = "테스트 파일을 기본으로 숨기고 Git diff를 리뷰합니다",
+    after_help = "예시:\n  diff-tui                     HEAD 대비 작업 중인 변경을 나란히 보기\n  diff-tui main                main과 현재 HEAD 비교\n  diff-tui main feature        체크아웃 없이 두 브랜치 끝 비교\n  diff-tui --unified           통합 보기로 시작\n  diff-tui --unstaged          git diff와 같은 비교\n  diff-tui --staged            git diff --cached와 같은 비교\n  diff-tui -C /path/to/repo    다른 저장소 리뷰\n\nTUI 안에서: v 보기 전환, b 브랜치 선택, w 작업 중인 변경으로 복귀, t 테스트 표시 전환, T 다크/라이트 테마."
 )]
 struct Cli {
-    /// Branches, tags, or commits to compare; TO defaults to HEAD
+    /// 비교할 브랜치, 태그 또는 커밋 (TO 기본값은 HEAD)
     #[arg(value_names = ["FROM", "TO"], num_args = 1..=2)]
     revisions: Vec<String>,
-    /// Repository directory; defaults to the current directory
+    /// 저장소 디렉터리 (기본값은 현재 디렉터리)
     #[arg(short = 'C', long, default_value = ".")]
     repo: PathBuf,
-    /// Compare HEAD with the index
+    /// HEAD와 index 비교
     #[arg(long, conflicts_with_all = ["unstaged", "revisions"])]
     staged: bool,
-    /// Compare the index with the working tree
+    /// index와 작업 트리 비교
     #[arg(long, conflicts_with = "revisions")]
     unstaged: bool,
-    /// Start with test files visible
+    /// 테스트 파일을 보이게 하고 시작
     #[arg(short = 't', long)]
     show_tests: bool,
-    /// Start in unified view instead of the default side-by-side view
+    /// 기본 나란히 보기 대신 통합 보기로 시작
     #[arg(long)]
     unified: bool,
 }
@@ -82,7 +82,7 @@ fn main() -> Result<()> {
     let repo = Repository::open(&cli.repo)?;
     ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
-        "diff-tui needs an interactive terminal. Run diff-tui --help for usage."
+        "diff-tui는 대화형 터미널이 필요합니다. 사용법은 diff-tui --help를 참고하세요."
     );
     let test_files = if cli.show_tests {
         TestFiles::Shown
@@ -149,7 +149,9 @@ fn run(
                 && let Some(settings) = settings
                 && let Err(error) = settings.save_appearance(app.display.appearance)
             {
-                app.error = Some(escape_controls(&format!("Cannot save theme: {error:#}")));
+                app.error = Some(escape_controls(&format!(
+                    "테마를 저장할 수 없습니다: {error:#}"
+                )));
             }
         }
     }

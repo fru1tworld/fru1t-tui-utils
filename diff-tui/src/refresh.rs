@@ -29,7 +29,7 @@ impl Preview {
                 Ok(sources) => (sources, None),
                 Err(error) => (
                     Sources::default(),
-                    Some(format!("Could not read source for highlighting: {error:#}")),
+                    Some(format!("구문 강조용 소스를 읽을 수 없습니다: {error:#}")),
                 ),
             }
         } else {
@@ -125,7 +125,7 @@ impl Poller {
                 Ok(Some(reply))
             }
             Err(TryRecvError::Empty) => Ok(None),
-            Err(TryRecvError::Disconnected) => bail!("Git refresh worker stopped"),
+            Err(TryRecvError::Disconnected) => bail!("Git 새로고침 작업이 멈췄습니다"),
         }
     }
 }

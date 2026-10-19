@@ -19,9 +19,9 @@ pub enum Mode {
 impl Mode {
     pub fn label(&self) -> String {
         match self {
-            Self::Working => "HEAD -> working tree (staged + unstaged + untracked)".into(),
-            Self::Unstaged => "index -> working tree (unstaged)".into(),
-            Self::Staged => "HEAD -> index (staged)".into(),
+            Self::Working => "HEAD -> 작업 트리 (스테이징 + 언스테이징 + 추적 안 함)".into(),
+            Self::Unstaged => "index -> 작업 트리 (언스테이징)".into(),
+            Self::Staged => "HEAD -> index (스테이징)".into(),
             Self::Branches { from, to } => format!("{from} -> {to}"),
         }
     }
@@ -97,14 +97,14 @@ impl Change {
     pub fn move_summary(&self, similarity: &str) -> Option<String> {
         let old = self.old_path.as_ref()?;
         let verb = if self.status == ChangeStatus::Copied {
-            "Copied"
+            "복사됨"
         } else {
-            "Moved"
+            "이동됨"
         };
         let detail = if similarity == "100%" {
-            "content unchanged".to_owned()
+            "내용 동일".to_owned()
         } else {
-            format!("{similarity} similar")
+            format!("{similarity} 유사")
         };
         let paths = collapse_move(
             &escape_controls(&old.to_string_lossy()),
@@ -240,7 +240,7 @@ impl Repository {
             self.command()
                 .args(args)
                 .output()
-                .context("Could not run git")?,
+                .context("git을 실행할 수 없습니다")?,
         )
     }
 
@@ -252,7 +252,7 @@ impl Repository {
                 "--end-of-options",
                 &format!("{revision}^{{commit}}"),
             ])
-            .with_context(|| format!("Cannot resolve revision {}", escape_controls(revision)))?;
+            .with_context(|| format!("리비전을 찾을 수 없습니다: {}", escape_controls(revision)))?;
         trimmed_text(bytes)
     }
 
@@ -378,11 +378,11 @@ impl Repository {
             .args(["--", "/dev/null"])
             .arg(&change.path)
             .output()
-            .context("Could not read untracked file diff")?;
+            .context("추적하지 않는 파일의 diff를 읽을 수 없습니다")?;
         let identical_or_different = matches!(output.status.code(), Some(0 | 1));
         ensure!(
             identical_or_different,
-            "Could not read untracked file {}: {}",
+            "추적하지 않는 파일을 읽을 수 없습니다: {}: {}",
             change.label(),
             stderr_message(&output)
         );
@@ -491,7 +491,7 @@ fn decode_path(bytes: &[u8]) -> Result<OsString> {
 #[cfg(not(unix))]
 fn decode_path(bytes: &[u8]) -> Result<OsString> {
     Ok(String::from_utf8(bytes.to_vec())
-        .context("Git path is not valid UTF-8")?
+        .context("Git 경로가 올바른 UTF-8이 아닙니다")?
         .into())
 }
 
@@ -503,12 +503,12 @@ fn parse_changes(bytes: &[u8]) -> Result<Vec<Change>> {
             break;
         }
         let Some(&code) = status.first() else {
-            bail!("Empty git diff status");
+            bail!("git diff 상태가 비어 있습니다");
         };
         let status = ChangeStatus::from_git(code);
-        let first = next_path(&mut fields, "Missing git diff path")?;
+        let first = next_path(&mut fields, "git diff 경로가 없습니다")?;
         let (old_path, path) = if matches!(status, ChangeStatus::Renamed | ChangeStatus::Copied) {
-            let destination = next_path(&mut fields, "Missing rename destination")?;
+            let destination = next_path(&mut fields, "이름 변경 대상 경로가 없습니다")?;
             (Some(first), destination)
         } else {
             (None, first)
@@ -738,11 +738,11 @@ mod tests {
         };
         assert_eq!(
             change.move_summary("100%").as_deref(),
-            Some("Moved, content unchanged: src/{a.rs -> b.rs}")
+            Some("이동됨, 내용 동일: src/{a.rs -> b.rs}")
         );
         assert_eq!(
             change.move_summary("96%").as_deref(),
-            Some("Moved, 96% similar: src/{a.rs -> b.rs}")
+            Some("이동됨, 96% 유사: src/{a.rs -> b.rs}")
         );
     }
 

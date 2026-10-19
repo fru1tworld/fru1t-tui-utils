@@ -936,26 +936,20 @@ fn tab_switches_preview_and_full_screen_and_keeps_directory_navigation() {
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
     let render = |app: &mut App, terminal: &mut Terminal<TestBackend>| {
         terminal.draw(|frame| ui::draw(frame, app)).unwrap();
-        terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>()
+        ui::screen_text(terminal.backend().buffer())
     };
     let text = render(&mut app, &mut terminal);
-    assert!(text.contains(" Files "));
+    assert!(text.contains("┌ 파일 (Tab 코드)"));
     assert!(text.contains("project/application/src/main/kotlin/"));
-    assert!(text.contains("Before | Kotlin"));
+    assert!(text.contains("변경 전 | Kotlin"));
     assert!(!text.contains("..."));
     let selected = app.tree.current().unwrap().path.clone();
     app.handle(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .unwrap();
     let text = render(&mut app, &mut terminal);
-    assert!(text.contains("Before | Kotlin"));
-    assert!(text.contains("After | Kotlin"));
-    assert!(!text.contains(" Files "));
+    assert!(text.contains("변경 전 | Kotlin"));
+    assert!(text.contains("변경 후 | Kotlin"));
+    assert!(!text.contains("┌ 파일 (Tab 코드)"));
     assert!(!text.contains("diff --git"));
     assert!(!text.contains("--- a/"));
     assert!(!text.contains("+++ b/"));

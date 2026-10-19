@@ -41,8 +41,8 @@ pub enum ViewMode {
 impl ViewMode {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Split => "Side by side",
-            Self::Unified => "Unified",
+            Self::Split => "나란히",
+            Self::Unified => "통합",
         }
     }
 
@@ -179,7 +179,7 @@ impl DiffDisplay {
                 Ok(highlighted) => highlighted.unwrap_or_default(),
                 Err(error) => {
                     warning = Some(format!(
-                        "Syntax highlighting unavailable: {error}. Showing plain text."
+                        "구문 강조를 쓸 수 없어 일반 텍스트로 표시합니다: {error}"
                     ));
                     HighlightedSource::default()
                 }

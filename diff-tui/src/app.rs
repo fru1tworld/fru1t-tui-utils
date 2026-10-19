@@ -293,7 +293,7 @@ impl App {
         self.refresh_error = update
             .and_then(|update| self.apply_update(update))
             .err()
-            .map(|error| escape_controls(&format!("Auto refresh failed: {error:#}")));
+            .map(|error| escape_controls(&format!("자동 새로고침 실패: {error:#}")));
     }
 
     fn apply_update(&mut self, update: Update) -> Result<()> {
