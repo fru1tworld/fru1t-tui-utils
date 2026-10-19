@@ -35,10 +35,10 @@
     "url": "https://github.com/fru1tworld/tp-cli.git"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.8",
+    "@biomejs/biome": "2.5.15",
     "@types/node": "24.19.2",
-    "execa": "10.0.1",
-    "knip": "6.39.0",
+    "execa": "10.1.1",
+    "knip": "6.41.0",
     "typescript": "7.0.2"
   },
   "engines": {
