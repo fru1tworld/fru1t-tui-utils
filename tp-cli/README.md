@@ -4,7 +4,7 @@
 
 ## Tech Stack
 
-`TypeScript` `Node.js` `Vitest` `Biome`
+`TypeScript 7` `Node.js 24` `node:test` `execa` `Biome`
 
 ## 설치
 
@@ -32,11 +32,14 @@ source ~/.tp/tp.nu           # ~/.config/nushell/config.nu
 ## 사용법
 
 ```bash
-tp add <alias>      # 현재 디렉토리 북마크 추가 또는 갱신(UPSERT)
+tp <alias>          # 북마크한 디렉토리로 이동 — 유일한 접두사도 된다 (tp ph -> phs)
+tp <alias>/<sub>    # 북마크 아래 하위 디렉토리로 이동 (tp opi/services)
+tp add [alias]      # 현재 디렉토리 북마크 추가 또는 갱신(UPSERT) — 별칭 생략 시 폴더 이름
 tp set <alias> <path> [<alias> <path> ...]
                     # 하나 이상의 북마크 경로를 지정하거나 갱신(UPSERT)
-tp <alias>          # 북마크한 디렉토리로 이동
-tp list             # 목록 — 별칭 UTF-8 바이트순
+tp path <alias>[/sub]
+                    # 경로만 출력 — code "$(tp-cli path opi)"
+tp list [filter]    # 목록 — 부모 경로별로 묶고 별칭 UTF-8 바이트순, 사라진 경로는 (missing)
 tp list -r          # 목록 — 등록 최신순
 tp del <alias>      # 북마크 삭제
 tp ch <old> <new>   # 별칭 변경
@@ -54,6 +57,7 @@ tp-cli init <shell> # 쉘 함수 출력 (bash|zsh|fish|nu)
 
 ```bash
 tp <TAB>        # 명령어 + 별칭
+tp opi/<TAB>    # 북마크 아래 하위 디렉토리
 tp add <TAB>    # 갱신할 기존 별칭
 tp del <TAB>    # 별칭
 tp list <TAB>   # 정렬 플래그 (bash, zsh, fish)
@@ -81,10 +85,18 @@ tp app              # ~/projects/renamed-app으로 이동
 
 ## 요구사항
 
-- Node.js >= 20
+- Node.js >= 24
 - macOS / Linux
 - 지원 쉘: Bash, Zsh, Fish, Nushell
 
 ## 라이선스
 
 MIT
+
+## 개발
+
+```bash
+pnpm dev list       # 빌드 없이 src/index.ts 실행 (Node 24 type stripping)
+pnpm check          # lint + typecheck + test
+pnpm build          # dist/ 생성 (npm 배포용)
+```

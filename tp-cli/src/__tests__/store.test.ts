@@ -1,84 +1,77 @@
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CommandError } from "../errors.js";
-import {
-  type Bookmark,
-  ensureBookmarksFile,
-  loadBookmarks,
-  loadConfig,
-} from "../store.js";
+import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { describe, it } from "node:test";
+import { StoreError } from "../errors.ts";
+import { type Bookmark, loadBookmarks, loadConfig, saveBookmarks, updateBookmarks } from "../store.ts";
+import { useSandbox } from "./helpers.ts";
 
-let tmpDir: string;
-let dataFile: string;
-
-beforeEach(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "tp-store-test-"));
-  dataFile = path.join(tmpDir, "bookmarks.json");
-});
-
-afterEach(() => {
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-});
-
-describe("ensureBookmarksFile", () => {
-  it("creates directory and file when missing", () => {
-    const nested = path.join(tmpDir, "sub", "bookmarks.json");
-    ensureBookmarksFile(nested);
-    expect(fs.existsSync(path.join(tmpDir, "sub"))).toBe(true);
-    expect(fs.existsSync(nested)).toBe(true);
-    expect(fs.readFileSync(nested, "utf-8")).toBe("[]");
-  });
-});
+const sandbox = useSandbox();
 
 describe("loadBookmarks", () => {
-  it("returns empty array for new file", () => {
-    expect(loadBookmarks(dataFile)).toEqual([]);
+  it("returns an empty list without creating the file", async () => {
+    assert.deepEqual(await loadBookmarks(sandbox.dataFile), []);
+    assert.equal(existsSync(sandbox.dataFile), false);
   });
 
-  it("returns bookmarks from existing file", () => {
-    const bookmarks: Bookmark[] = [
-      { alias: "test", path: "/tmp/test", createdAt: 1 },
-    ];
-    fs.writeFileSync(dataFile, JSON.stringify(bookmarks));
-    expect(loadBookmarks(dataFile)).toEqual(bookmarks);
+  it("round-trips saved bookmarks", async () => {
+    const bookmarks: Bookmark[] = [{ alias: "test", path: "/tmp/test", createdAt: 1 }];
+    await saveBookmarks(sandbox.dataFile, bookmarks);
+    assert.deepEqual(await loadBookmarks(sandbox.dataFile), bookmarks);
   });
 
-  it("reports malformed JSON as a command error", () => {
-    fs.writeFileSync(dataFile, "{");
-    expect(() => loadBookmarks(dataFile)).toThrow(
-      "Invalid JSON in bookmarks file",
+  it("reports malformed JSON as a store error", async () => {
+    await writeFile(sandbox.dataFile, "{");
+    await assert.rejects(loadBookmarks(sandbox.dataFile), StoreError);
+  });
+
+  it("rejects an invalid runtime schema", async () => {
+    await writeFile(sandbox.dataFile, JSON.stringify([{ alias: "x", path: 42 }]));
+    await assert.rejects(loadBookmarks(sandbox.dataFile), /Invalid bookmarks schema/);
+  });
+});
+
+describe("updateBookmarks", () => {
+  it("serializes concurrent updates", async () => {
+    const aliases = ["a", "b", "c", "d", "e"];
+    await Promise.all(
+      aliases.map((alias) =>
+        updateBookmarks(sandbox.dataFile, (bookmarks) => ({
+          message: alias,
+          nextBookmarks: [...bookmarks, { alias, path: `/${alias}`, createdAt: 1 }],
+        })),
+      ),
     );
+    const saved = (await loadBookmarks(sandbox.dataFile)).map(({ alias }) => alias).toSorted();
+    assert.deepEqual(saved, aliases);
   });
 
-  it("rejects bookmarks with an invalid runtime schema", () => {
-    fs.writeFileSync(dataFile, JSON.stringify([{ alias: "x", path: 42 }]));
-    expect(() => loadBookmarks(dataFile)).toThrow("Invalid bookmarks schema");
+  it("leaves the file untouched when nothing changes", async () => {
+    assert.equal(await updateBookmarks(sandbox.dataFile, () => ({ message: "noop" })), "noop");
+    assert.equal(existsSync(sandbox.dataFile), false);
   });
 });
 
 describe("loadConfig", () => {
-  it("returns empty object when file does not exist", () => {
-    expect(loadConfig(path.join(tmpDir, "nonexistent.json"))).toEqual({});
+  const configFile = () => join(sandbox.dir, "config.json");
+
+  it("returns an empty config when the file does not exist", async () => {
+    assert.deepEqual(await loadConfig(configFile()), {});
   });
 
-  it("returns parsed config from file", () => {
-    const configFile = path.join(tmpDir, "config.json");
-    fs.writeFileSync(configFile, JSON.stringify({ caseSensitive: true }));
-    expect(loadConfig(configFile)).toEqual({ caseSensitive: true });
+  it("parses a valid config", async () => {
+    await writeFile(configFile(), JSON.stringify({ caseSensitive: true }));
+    assert.deepEqual(await loadConfig(configFile()), { caseSensitive: true });
   });
 
-  it("throws for invalid JSON", () => {
-    const configFile = path.join(tmpDir, "config.json");
-    fs.writeFileSync(configFile, "not json");
-    expect(() => loadConfig(configFile)).toThrow(CommandError);
-    expect(() => loadConfig(configFile)).toThrow("Invalid JSON in config file");
+  it("rejects invalid JSON", async () => {
+    await writeFile(configFile(), "not json");
+    await assert.rejects(loadConfig(configFile()), /Invalid JSON in config file/);
   });
 
-  it("rejects an invalid runtime schema", () => {
-    const configFile = path.join(tmpDir, "config.json");
-    fs.writeFileSync(configFile, JSON.stringify({ caseSensitive: "yes" }));
-    expect(() => loadConfig(configFile)).toThrow("Invalid config schema");
+  it("rejects an invalid runtime schema", async () => {
+    await writeFile(configFile(), JSON.stringify({ caseSensitive: "yes" }));
+    await assert.rejects(loadConfig(configFile()), /Invalid config schema/);
   });
 });

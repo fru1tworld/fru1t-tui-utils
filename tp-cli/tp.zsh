@@ -1,45 +1,19 @@
 tp() {
     local output
-    output=$(tp-cli "$@")
-    local command_status=$?
-
-    if (( command_status != 0 )); then
-        print -r -- "$output" >&2
-        return $command_status
-    fi
+    output=$(tp-cli "$@") || return
 
     if [[ "$output" == __TP_CD__:* ]]; then
-        local target="${output#__TP_CD__:}"
-        builtin cd -- "$target"
+        builtin cd -- "${output#__TP_CD__:}"
     else
         print -r -- "$output"
     fi
 }
 
+# Candidates come from `tp-cli --complete`; ones ending in "/" take no suffix.
 _tp_completions_zsh() {
-    local commands="add set del ch gc list help"
-    local aliases=$(tp-cli --completions 2>/dev/null)
-
-    case "$words[2]" in
-        add|del|ch)
-            _values 'alias' ${(f)aliases}
-            ;;
-        set)
-            if (( CURRENT % 2 == 1 )); then
-                _values 'alias' ${(f)aliases}
-            else
-                _directories
-            fi
-            ;;
-        list)
-            _values 'order' -u --utf8 -r --recent
-            ;;
-        gc|help)
-            ;;
-        *)
-            _values 'command' $commands ${(f)aliases}
-            ;;
-    esac
+    local -a candidates=(${(f)"$(tp-cli --complete "${(@)words[2,CURRENT]}" 2>/dev/null)"})
+    compadd -S '' -- ${(M)candidates:#*/}
+    compadd -- ${candidates:#*/}
 }
 
 (( $+functions[compdef] )) && compdef _tp_completions_zsh tp

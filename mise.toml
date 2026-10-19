@@ -1,3 +1,6 @@
+[tools]
+node = "24"
+
 [tasks.check]
 description = "Run every repository check"
 depends = ["check:rust", "check:tp"]
@@ -15,6 +18,8 @@ description = "Lint, test, and build tp-cli"
 dir = "tp-cli"
 run = [
   "pnpm lint",
+  "pnpm typecheck",
+  "pnpm knip",
   "pnpm test",
   "pnpm build",
   "bash -n tp.bash",

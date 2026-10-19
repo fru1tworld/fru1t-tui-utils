@@ -1,190 +1,63 @@
-import { spawnSync } from "node:child_process";
-import * as fs from "node:fs";
-import * as path from "node:path";
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { execa } from "execa";
+import { CD_DIRECTIVE_PREFIX } from "../commands.ts";
+import { shellInit, shellScriptFile } from "../shell.ts";
+import { type Shell, SUPPORTED_SHELLS } from "../usage.ts";
+import { assertRejects } from "./helpers.ts";
 
-const root = fileURLToPath(new URL("../..", import.meta.url));
+const wrapperPath = (shell: Shell) => fileURLToPath(shellScriptFile(shell));
 
-describe("Shell integration files", () => {
-  describe("tp.bash (Bash)", () => {
-    const filePath = path.join(root, "tp.bash");
+async function hasShell(shell: string): Promise<boolean> {
+  const { failed } = await execa(shell, ["-c", "exit 0"], { reject: false });
+  return !failed;
+}
 
-    it("contains tp wrapper function", () => {
-      const content = fs.readFileSync(filePath, "utf-8");
-      expect(content).toContain("tp()");
-      expect(content).toContain("tp-cli");
-      expect(content).toContain("__TP_CD__:");
-      expect(content).toContain('cd -- "');
+describe("shellInit", () => {
+  for (const shell of SUPPORTED_SHELLS) {
+    it(`prints the ${shell} wrapper, which delegates cd and completion to tp-cli`, async () => {
+      const script = await shellInit(shell);
+      assert.equal(script, (await readFile(shellScriptFile(shell), "utf-8")).trimEnd());
+      assert.ok(script.includes(CD_DIRECTIVE_PREFIX));
+      assert.ok(script.includes("tp-cli --complete"));
     });
+  }
 
-    it("contains Bash completion function", () => {
-      const content = fs.readFileSync(filePath, "utf-8");
-      expect(content).toContain("_tp_completions()");
-      expect(content).toContain("COMP_WORDS");
-      expect(content).toContain("COMPREPLY");
-      expect(content).toContain("--completions");
-    });
-
-    it("registers completion", () => {
-      const content = fs.readFileSync(filePath, "utf-8");
-      expect(content).toContain("complete -F _tp_completions tp");
-    });
-
-    it("completes list order flags", () => {
-      const content = fs.readFileSync(filePath, "utf-8");
-      expect(content).toContain("-u --utf8 -r --recent");
-    });
+  it("rejects missing and unsupported shells", async () => {
+    await assertRejects(shellInit(undefined), "Usage: tp-cli init");
+    await assertRejects(shellInit("powershell"), "bash|zsh|fish|nu");
   });
+});
 
-  describe("tp.zsh (Zsh)", () => {
-    const filePath = path.join(root, "tp.zsh");
+describe("shell wrappers", () => {
+  const failingCli = {
+    bash: 'tp-cli() { printf failure; return 7; }; source "$1"; tp missing',
+    zsh: 'function tp-cli { print -n failure; return 7 }; source "$1"; tp missing',
+    fish: "function tp-cli; printf failure; return 7; end; source $argv[1]; tp missing",
+  } as const satisfies Partial<Record<Shell, string>>;
 
-    it("contains tp wrapper function", () => {
-      const content = fs.readFileSync(filePath, "utf-8");
-      expect(content).toContain("tp()");
-      expect(content).toContain("tp-cli");
-      expect(content).toContain("__TP_CD__:");
-      expect(content).toContain('cd -- "');
+  for (const shell of ["bash", "zsh", "fish"] as const) {
+    const script = failingCli[shell];
+    it(`${shell} preserves tp-cli failures without printing stdout`, async (t) => {
+      if (!(await hasShell(shell))) return t.skip(`${shell} is not installed`);
+      const args = shell === "fish" ? [wrapperPath(shell)] : ["tp-wrapper-test", wrapperPath(shell)];
+      const { exitCode, stdout } = await execa(shell, ["-c", script, ...args], { reject: false });
+      assert.equal(exitCode, 7);
+      assert.equal(stdout, "");
     });
+  }
 
-    it("contains Zsh completion function", () => {
-      const content = fs.readFileSync(filePath, "utf-8");
-      expect(content).toContain("_tp_completions_zsh()");
-      expect(content).toContain("_values");
-      expect(content).toContain("--completions");
-    });
-
-    it("registers completion with compdef", () => {
-      const content = fs.readFileSync(filePath, "utf-8");
-      expect(content).toContain("compdef _tp_completions_zsh tp");
-    });
-
-    it("completes list order flags", () => {
-      const content = fs.readFileSync(filePath, "utf-8");
-      expect(content).toContain("_values 'order' -u --utf8 -r --recent");
-    });
-  });
-
-  describe("tp.nu (Nushell)", () => {
-    const filePath = path.join(root, "tp.nu");
-
-    it("contains tp wrapper function with --env", () => {
-      const content = fs.readFileSync(filePath, "utf-8");
-      expect(content).toContain("def --env tp");
-      expect(content).toContain("tp-cli");
-      expect(content).toContain("__TP_CD__:");
-      expect(content).toContain("str starts-with");
-      expect(content).toContain("str substring");
-      expect(content).toContain("cd");
-    });
-
-    it("contains completion function", () => {
-      const content = fs.readFileSync(filePath, "utf-8");
-      expect(content).toContain("nu-complete tp commands");
-      expect(content).toContain("--completions");
-    });
-
-    it("wires the completer to the tp arguments", () => {
-      const content = fs.readFileSync(filePath, "utf-8");
-      expect(content).toContain('...args: string@"nu-complete tp commands"');
-    });
-
-    it("defines the completer before tp uses it", () => {
-      const content = fs.readFileSync(filePath, "utf-8");
-      expect(content.indexOf('def "nu-complete tp commands"')).toBeLessThan(
-        content.indexOf("def --env tp"),
-      );
-    });
-
-    it("includes all tp subcommands", () => {
-      const content = fs.readFileSync(filePath, "utf-8");
-      const commands = ["add", "set", "del", "ch", "gc", "list", "help"];
-      for (const cmd of commands) {
-        expect(content).toContain(`"${cmd}"`);
-      }
-    });
-  });
-
-  describe("tp.fish (Fish)", () => {
-    const filePath = path.join(root, "tp.fish");
-
-    it("contains tp wrapper function", () => {
-      const content = fs.readFileSync(filePath, "utf-8");
-      expect(content).toContain("function tp");
-      expect(content).toContain("tp-cli");
-      expect(content).toContain("__TP_CD__:");
-      expect(content).toContain("string match");
-      expect(content).toContain("string replace");
-      expect(content).toContain("cd");
-    });
-
-    it("contains completion setup", () => {
-      const content = fs.readFileSync(filePath, "utf-8");
-      expect(content).toContain("complete -c tp");
-      expect(content).toContain("__fish_use_subcommand");
-      expect(content).toContain("--completions");
-    });
-
-    it("registers all tp subcommands", () => {
-      const content = fs.readFileSync(filePath, "utf-8");
-      const commands = ["add", "set", "del", "ch", "gc", "list", "help"];
-      for (const cmd of commands) {
-        expect(content).toContain(cmd);
-      }
-    });
-
-    it("provides alias completion for add, del, and ch", () => {
-      const content = fs.readFileSync(filePath, "utf-8");
-      expect(content).toContain("__fish_seen_subcommand_from add del ch");
-    });
-
-    it("completes list order flags", () => {
-      const content = fs.readFileSync(filePath, "utf-8");
-      expect(content).toContain(
-        "__fish_seen_subcommand_from list' -s u -l utf8",
-      );
-      expect(content).toContain(
-        "__fish_seen_subcommand_from list' -s r -l recent",
-      );
-    });
-  });
-
-  describe("wrapper exit status", () => {
-    const cases = [
-      {
-        shell: "bash",
-        wrapper: "tp.bash",
-        script:
-          'tp-cli() { printf failure; return 7; }; source "$1"; tp missing >/dev/null 2>&1',
-      },
-      {
-        shell: "zsh",
-        wrapper: "tp.zsh",
-        script:
-          'function tp-cli { print -n failure; return 7 }; source "$1"; tp missing >/dev/null 2>&1',
-      },
-      {
-        shell: "fish",
-        wrapper: "tp.fish",
-        script:
-          "function tp-cli; printf failure; return 7; end; source $argv[2]; tp missing >/dev/null 2>&1",
-      },
-    ] as const;
-
-    for (const testCase of cases) {
-      it(`${testCase.shell} preserves tp-cli failures`, () => {
-        const available = spawnSync(testCase.shell, ["--version"]);
-        if (available.error) return;
-
-        const result = spawnSync(testCase.shell, [
-          "-c",
-          testCase.script,
-          "tp-wrapper-test",
-          path.join(root, testCase.wrapper),
-        ]);
-        expect(result.status).toBe(7);
-      });
-    }
+  it("bash adds a space only after finished words", async () => {
+    const script = [
+      "tp-cli() { printf 'app/src/\\nadd\\n'; }",
+      'source "$1"',
+      "COMP_WORDS=(tp a); COMP_CWORD=1; _tp_completions",
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: bash expansion, not a JS template
+      'printf "[%s]" "${COMPREPLY[@]}"',
+    ].join("\n");
+    const { stdout } = await execa("bash", ["-c", script, "tp-wrapper-test", wrapperPath("bash")]);
+    assert.equal(stdout, "[app/src/][add ]");
   });
 });

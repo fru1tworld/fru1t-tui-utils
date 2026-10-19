@@ -1,15 +1,18 @@
-# 자동 의존성 업데이트 및 보안 취약점 알림
+# Automated dependency updates and security alerts
 version: 2
 updates:
-  # npm 의존성 업데이트
   - package-ecosystem: "npm"
-    directory: "/"
+    directory: "/tp-cli"
     schedule:
       interval: "weekly"
       day: "monday"
     open-pull-requests-limit: 10
+    ignore:
+      # Keep Node types aligned with the minimum supported Node major (engines)
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
     groups:
-      # 개발 의존성은 그룹으로 묶어서 PR 수 감소
+      # Group dev dependency bumps to reduce PR noise
       dev-dependencies:
         dependency-type: "development"
         update-types:
@@ -18,7 +21,14 @@ updates:
     commit-message:
       prefix: "chore(deps)"
 
-  # GitHub Actions 버전 업데이트
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "chore(deps)"
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

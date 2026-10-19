@@ -1,451 +1,284 @@
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  add,
-  ch,
-  completions,
-  del,
-  gc,
-  go,
-  list,
-  SUPPORTED_SHELLS,
-  set,
-  shellInit,
-} from "../commands.js";
-import { CommandError } from "../errors.js";
-import {
-  type Bookmark,
-  loadBookmarks,
-  saveBookmarks,
-  type TpConfig,
-} from "../store.js";
+import assert from "node:assert/strict";
+import { writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { basename, join } from "node:path";
+import { describe, it } from "node:test";
+import { add, CD_DIRECTIVE_PREFIX, ch, del, gc, go, list, path, set } from "../commands.ts";
+import { loadBookmarks, saveBookmarks } from "../store.ts";
+import { assertIncludes, assertRejects, useSandbox } from "./helpers.ts";
 
-let tmpDir: string;
-let dataFile: string;
-
-beforeEach(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "tp-test-"));
-  dataFile = path.join(tmpDir, "bookmarks.json");
-});
-
-afterEach(() => {
-  vi.unstubAllEnvs();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-});
+const sandbox = useSandbox();
+const at = (cwd: string) => sandbox.context(cwd);
+const caseSensitive = (cwd?: string) => sandbox.context(cwd, { caseSensitive: true });
+const aliases = async () => (await loadBookmarks(sandbox.dataFile)).map(({ alias }) => alias);
 
 describe("add", () => {
-  it("adds a new bookmark", () => {
-    const result = add("proj", "/home/user/proj", dataFile);
-    expect(result).toBe("Added: proj -> /home/user/proj");
-    const bookmarks = loadBookmarks(dataFile);
-    expect(bookmarks).toHaveLength(1);
-    expect(bookmarks[0].alias).toBe("proj");
-    expect(bookmarks[0].path).toBe("/home/user/proj");
+  it("adds a new bookmark", async () => {
+    assert.equal(await add("proj", at("/work/proj")), "Added: proj -> /work/proj");
+    assert.deepEqual(await aliases(), ["proj"]);
   });
 
-  it("throws on missing alias", () => {
-    expect(() => add("", "/tmp", dataFile)).toThrow(CommandError);
-    expect(() => add("", "/tmp", dataFile)).toThrow("Usage: tp add <alias>");
+  it("uses the directory name when the alias is omitted", async () => {
+    assert.equal(await add(undefined, at("/work/my-app")), "Added: my-app -> /work/my-app");
   });
 
-  it("rejects reserved command names", () => {
-    expect(() => add("list", "/tmp", dataFile)).toThrow(
-      "Alias 'list' is reserved",
-    );
+  it("rejects empty, reserved, and malformed aliases", async () => {
+    await assertRejects(add("", at("/x")), "Usage: tp add [alias]");
+    await assertRejects(add("list", at("/x")), "Alias 'list' is reserved");
+    await assertRejects(add(undefined, at("/work/init")), "Alias 'init' is reserved");
+    await assertRejects(add("-x", at("/x")), "is reserved");
+    await assertRejects(add("a b", at("/x")), "whitespace or '/'");
+    await assertRejects(add("a/b", at("/x")), "whitespace or '/'");
   });
 
-  it("updates an existing alias", () => {
-    add("dup", "/a", dataFile);
-    const result = add("dup", "/b", dataFile);
-    expect(result).toBe("Updated: 'dup' /a -> /b");
-    expect(loadBookmarks(dataFile)).toHaveLength(1);
-    expect(loadBookmarks(dataFile)[0].path).toBe("/b");
+  it("prepends new bookmarks", async () => {
+    await add("a", at("/a"));
+    await add("b", at("/b"));
+    assert.deepEqual(await aliases(), ["b", "a"]);
   });
 
-  it("updates case-insensitive aliases while preserving their name", () => {
-    add("Work", "/a", dataFile);
-    expect(add("work", "/b", dataFile)).toBe("Updated: 'Work' /a -> /b");
-    expect(loadBookmarks(dataFile)[0]).toMatchObject({
-      alias: "Work",
-      path: "/b",
-    });
-  });
-
-  it("allows case-different alias when caseSensitive is true", () => {
-    const config: TpConfig = { caseSensitive: true };
-    add("Work", "/a", dataFile, config);
-    const result = add("work", "/b", dataFile, config);
-    expect(result).toBe("Added: work -> /b");
-  });
-
-  it("throws on duplicate path", () => {
-    add("first", "/same", dataFile);
-    expect(() => add("second", "/same", dataFile)).toThrow(CommandError);
-    expect(() => add("second", "/same", dataFile)).toThrow(
-      "already registered",
-    );
-  });
-
-  it("prepends new bookmarks (newest first)", () => {
-    add("a", "/a", dataFile);
-    add("b", "/b", dataFile);
-    const bookmarks = loadBookmarks(dataFile);
-    expect(bookmarks[0].alias).toBe("b");
-    expect(bookmarks[1].alias).toBe("a");
-  });
-
-  it("moves an updated bookmark to the front", () => {
-    saveBookmarks(dataFile, [
+  it("moves an updated bookmark to the front with a fresh timestamp", async () => {
+    await saveBookmarks(sandbox.dataFile, [
       { alias: "other", path: "/other", createdAt: 2 },
       { alias: "study", path: "/old", createdAt: 1 },
     ]);
-
-    const result = add("study", "/current", dataFile);
-
-    expect(result).toBe("Updated: 'study' /old -> /current");
-    const bookmarks = loadBookmarks(dataFile);
-    expect(bookmarks[0]).toMatchObject({ alias: "study", path: "/current" });
-    expect(bookmarks[0].createdAt).toBeGreaterThan(1);
-    expect(bookmarks[1].alias).toBe("other");
+    assert.equal(await add("study", at("/current")), "Updated: 'study' /old -> /current");
+    const [first, second] = await loadBookmarks(sandbox.dataFile);
+    assert.equal(first?.path, "/current");
+    assert.ok((first?.createdAt ?? 0) > 1);
+    assert.equal(second?.alias, "other");
   });
 
-  it("does not rewrite a bookmark already registered for cwd", () => {
+  it("keeps the stored spelling when updating case-insensitively", async () => {
+    await add("Proj", at("/a"));
+    assert.equal(await add("proj", at("/b")), "Updated: 'Proj' /a -> /b");
+    assert.deepEqual(await aliases(), ["Proj"]);
+  });
+
+  it("treats aliases differing in case as distinct when caseSensitive", async () => {
+    await add("proj", caseSensitive("/a"));
+    await add("Proj", caseSensitive("/b"));
+    assert.deepEqual(await aliases(), ["Proj", "proj"]);
+  });
+
+  it("does not rewrite a bookmark already registered for cwd", async () => {
     const bookmark = { alias: "here", path: "/current", createdAt: 1 };
-    saveBookmarks(dataFile, [bookmark]);
-    expect(add("here", "/current", dataFile)).toBe(
-      "Already registered: here -> /current",
-    );
-    expect(loadBookmarks(dataFile)).toEqual([bookmark]);
+    await saveBookmarks(sandbox.dataFile, [bookmark]);
+    assert.equal(await add("here", at("/current")), "Already registered: here -> /current");
+    assert.deepEqual(await loadBookmarks(sandbox.dataFile), [bookmark]);
   });
 
-  it("rejects a path registered under another alias", () => {
-    add("old", "/old", dataFile);
-    add("current", "/current", dataFile);
-
-    expect(() => add("old", "/current", dataFile)).toThrow(
-      "already registered as 'current'",
-    );
-    expect(loadBookmarks(dataFile).find((b) => b.alias === "old")?.path).toBe(
-      "/old",
-    );
+  it("rejects a path registered under another alias", async () => {
+    await add("old", at("/same"));
+    await assertRejects(add("new", at("/same")), "already registered as 'old'");
   });
 });
 
 describe("set", () => {
-  it("sets multiple bookmark paths relative to cwd", () => {
-    const todoDir = path.join(tmpDir, "todo-tui");
-    const tilDir = path.join(tmpDir, "til-tui");
-    fs.mkdirSync(todoDir);
-    fs.mkdirSync(tilDir);
-
-    const result = set(
-      ["todo", "./todo-tui", "til", "./til-tui"],
-      tmpDir,
-      dataFile,
+  it("sets several bookmarks relative to cwd", async () => {
+    await sandbox.mkdirs("first", "second");
+    const output = await set(["first", "./first", "second", "second"], sandbox.context());
+    assertIncludes(output, "Set 2 bookmarks:");
+    assert.deepEqual(
+      (await loadBookmarks(sandbox.dataFile)).map(({ alias, path }) => [alias, path]),
+      [
+        ["first", join(sandbox.dir, "first")],
+        ["second", join(sandbox.dir, "second")],
+      ],
     );
-
-    expect(result).toContain("Set 2 bookmarks:");
-    expect(loadBookmarks(dataFile)).toMatchObject([
-      { alias: "todo", path: todoDir },
-      { alias: "til", path: tilDir },
-    ]);
   });
 
-  it("updates existing aliases and adds new aliases", () => {
-    const firstDir = path.join(tmpDir, "first");
-    const secondDir = path.join(tmpDir, "second");
-    fs.mkdirSync(firstDir);
-    fs.mkdirSync(secondDir);
-    add("Existing", tmpDir, dataFile);
-
-    set(["existing", firstDir, "new", secondDir], tmpDir, dataFile);
-
-    expect(loadBookmarks(dataFile)).toMatchObject([
-      { alias: "Existing", path: firstDir },
-      { alias: "new", path: secondDir },
-    ]);
-  });
-
-  it("rejects incomplete alias-path pairs without changing bookmarks", () => {
-    add("existing", tmpDir, dataFile);
-
-    expect(() => set(["todo"], tmpDir, dataFile)).toThrow("Usage: tp set");
-    expect(loadBookmarks(dataFile)).toMatchObject([
-      { alias: "existing", path: tmpDir },
-    ]);
-  });
-
-  it("rejects duplicate paths without changing bookmarks", () => {
-    const targetDir = path.join(tmpDir, "target");
-    fs.mkdirSync(targetDir);
-    add("existing", tmpDir, dataFile);
-
-    expect(() =>
-      set(["a", targetDir, "b", targetDir], tmpDir, dataFile),
-    ).toThrow("is assigned to both");
-    expect(loadBookmarks(dataFile)).toMatchObject([
-      { alias: "existing", path: tmpDir },
-    ]);
-  });
-
-  it("rejects paths that are not directories", () => {
-    expect(() => set(["missing", "./missing"], tmpDir, dataFile)).toThrow(
-      "Directory does not exist",
+  it("updates existing aliases and keeps the others", async () => {
+    const target = await sandbox.mkdirs("target");
+    await add("keep", at("/keep"));
+    await add("Move", at("/old"));
+    await set(["move", target], sandbox.context());
+    assert.deepEqual(
+      (await loadBookmarks(sandbox.dataFile)).map(({ alias, path }) => [alias, path]),
+      [
+        ["Move", target],
+        ["keep", "/keep"],
+      ],
     );
-    fs.writeFileSync(path.join(tmpDir, "file.txt"), "");
-    expect(() => set(["file", "./file.txt"], tmpDir, dataFile)).toThrow(
-      "Directory does not exist",
-    );
+  });
+
+  it("rejects bad input without changing bookmarks", async () => {
+    const dir = await sandbox.mkdirs("dir");
+    await add("existing", at(dir));
+    await assertRejects(set(["a"], sandbox.context()), "Usage: tp set");
+    await assertRejects(set([], sandbox.context()), "Usage: tp set");
+    await assertRejects(set(["a", dir, "A", dir], sandbox.context()), "specified more than once");
+    await assertRejects(set(["other", dir], sandbox.context()), "assigned to both");
+    await assertRejects(set(["a", "./missing"], sandbox.context()), "Directory does not exist");
+    assert.deepEqual(await aliases(), ["existing"]);
   });
 });
 
 describe("del", () => {
-  it("deletes a bookmark", () => {
-    add("target", "/target", dataFile);
-    const result = del("target", dataFile);
-    expect(result).toBe("Deleted: target");
-    expect(loadBookmarks(dataFile)).toHaveLength(0);
+  it("deletes a bookmark case-insensitively by default", async () => {
+    await add("Proj", at("/a"));
+    assert.equal(await del("proj", sandbox.context()), "Deleted: proj");
+    assert.deepEqual(await aliases(), []);
   });
 
-  it("throws on missing alias", () => {
-    expect(() => del("", dataFile)).toThrow(CommandError);
-    expect(() => del("", dataFile)).toThrow("Usage: tp del <alias>");
-  });
-
-  it("throws on not found", () => {
-    expect(() => del("nope", dataFile)).toThrow(CommandError);
-    expect(() => del("nope", dataFile)).toThrow("not found");
-  });
-
-  it("deletes by case-insensitive alias by default", () => {
-    add("Work", "/work", dataFile);
-    const result = del("work", dataFile);
-    expect(result).toBe("Deleted: work");
-    expect(loadBookmarks(dataFile)).toHaveLength(0);
-  });
-
-  it("does not match case-different alias when caseSensitive is true", () => {
-    const config: TpConfig = { caseSensitive: true };
-    add("Work", "/work", dataFile, config);
-    expect(() => del("work", dataFile, config)).toThrow("not found");
+  it("rejects missing and unknown aliases", async () => {
+    await add("proj", caseSensitive("/a"));
+    await assertRejects(del(undefined, sandbox.context()), "Usage: tp del");
+    await assertRejects(del("nope", sandbox.context()), "Alias 'nope' not found.");
+    await assertRejects(del("Proj", caseSensitive()), "Alias 'Proj' not found.");
   });
 });
 
 describe("gc", () => {
-  it("reports no invalid bookmarks when all valid", () => {
-    add("tmp", tmpDir, dataFile);
-    const result = gc(dataFile);
-    expect(result).toBe("No invalid bookmarks found. All directories exist.");
+  it("reports when every directory exists", async () => {
+    await add("here", sandbox.context());
+    assertIncludes(await gc(sandbox.context()), "No invalid bookmarks found");
   });
 
-  it("removes invalid bookmarks", () => {
-    const bookmarks: Bookmark[] = [
-      { alias: "valid", path: tmpDir, createdAt: 1 },
-      { alias: "invalid", path: "/nonexistent/path/xyz", createdAt: 2 },
-    ];
-    saveBookmarks(dataFile, bookmarks);
-
-    const result = gc(dataFile);
-    expect(result).toContain("Found 1 invalid bookmark(s):");
-    expect(result).toContain("invalid");
-    expect(result).toContain("Removed 1 invalid bookmark(s).");
-    expect(loadBookmarks(dataFile)).toHaveLength(1);
-    expect(loadBookmarks(dataFile)[0].alias).toBe("valid");
+  it("removes bookmarks whose directory is gone", async () => {
+    await add("here", sandbox.context());
+    await add("gone", at("/nonexistent/path/xyz"));
+    const output = await gc(sandbox.context());
+    assertIncludes(output, "Found 1 invalid bookmark(s)");
+    assertIncludes(output, "gone");
+    assert.deepEqual(await aliases(), ["here"]);
   });
 });
 
 describe("ch", () => {
-  it("renames an alias", () => {
-    add("old", "/old", dataFile);
-    const result = ch("old", "new", dataFile);
-    expect(result).toBe("Renamed: 'old' -> 'new'");
-    const bookmarks = loadBookmarks(dataFile);
-    expect(bookmarks[0].alias).toBe("new");
+  it("renames an alias case-insensitively by default", async () => {
+    await add("Old", at("/a"));
+    assert.equal(await ch("old", "new", sandbox.context()), "Renamed: 'old' -> 'new'");
+    assert.deepEqual(await aliases(), ["new"]);
   });
 
-  it("throws on missing old alias param", () => {
-    expect(() => ch("", "new", dataFile)).toThrow(CommandError);
-    expect(() => ch("", "new", dataFile)).toThrow("Usage: tp ch");
+  it("rejects missing, identical, and unknown aliases", async () => {
+    await add("a", at("/a"));
+    await assertRejects(ch(undefined, "b", sandbox.context()), "Usage: tp ch");
+    await assertRejects(ch("a", undefined, sandbox.context()), "Usage: tp ch");
+    await assertRejects(ch("a", "A", sandbox.context()), "are the same");
+    await assertRejects(ch("nope", "b", sandbox.context()), "Alias 'nope' not found.");
   });
 
-  it("throws on missing new alias param", () => {
-    expect(() => ch("old", "", dataFile)).toThrow(CommandError);
-    expect(() => ch("old", "", dataFile)).toThrow("Usage: tp ch");
+  it("rejects renaming onto an alias with a different path", async () => {
+    await add("a", at("/a"));
+    await add("b", at("/b"));
+    await assertRejects(ch("a", "b", sandbox.context()), "already exists with a different path");
   });
 
-  it("throws when old and new are the same", () => {
-    expect(() => ch("same", "same", dataFile)).toThrow(CommandError);
-    expect(() => ch("same", "same", dataFile)).toThrow("are the same");
-  });
-
-  it("throws when old alias not found", () => {
-    expect(() => ch("missing", "new", dataFile)).toThrow(CommandError);
-    expect(() => ch("missing", "new", dataFile)).toThrow("not found");
-  });
-
-  it("throws when new alias exists with different path", () => {
-    add("a", "/a", dataFile);
-    add("b", "/b", dataFile);
-    expect(() => ch("a", "b", dataFile)).toThrow(CommandError);
-    expect(() => ch("a", "b", dataFile)).toThrow(
-      "already exists with a different path",
-    );
-  });
-
-  it("renames by case-insensitive alias by default", () => {
-    add("Work", "/work", dataFile);
-    const result = ch("work", "project", dataFile);
-    expect(result).toBe("Renamed: 'work' -> 'project'");
-    expect(loadBookmarks(dataFile)[0].alias).toBe("project");
-  });
-
-  it("treats case-different old and new as same by default", () => {
-    expect(() => ch("work", "Work", dataFile)).toThrow("are the same");
-  });
-
-  it("merges when new alias exists with same path", () => {
-    const bookmarks: Bookmark[] = [
+  it("merges into an alias pointing to the same path", async () => {
+    await saveBookmarks(sandbox.dataFile, [
       { alias: "a", path: "/same", createdAt: 1 },
       { alias: "b", path: "/same", createdAt: 2 },
-    ];
-    saveBookmarks(dataFile, bookmarks);
-
-    const result = ch("a", "b", dataFile);
-    expect(result).toContain("point to the same directory");
-    expect(result).toContain("Removed duplicate alias 'a'");
-    expect(result).toContain("Keeping 'b'");
-    expect(loadBookmarks(dataFile)).toHaveLength(1);
-    expect(loadBookmarks(dataFile)[0].alias).toBe("b");
+    ]);
+    assertIncludes(await ch("a", "b", sandbox.context()), "Removed duplicate alias 'a'");
+    assert.deepEqual(await aliases(), ["b"]);
   });
 });
 
-describe("go", () => {
-  it("returns __TP_CD__ protocol for valid alias", () => {
-    add("here", tmpDir, dataFile);
-    const result = go("here", dataFile);
-    expect(result).toBe(`__TP_CD__:${tmpDir}`);
+describe("go and path", () => {
+  it("resolves an exact alias to the cd directive", async () => {
+    await add("here", sandbox.context());
+    assert.equal(await go("here", sandbox.context()), `${CD_DIRECTIVE_PREFIX}${sandbox.dir}`);
+    assert.equal(await go("HERE", sandbox.context()), `${CD_DIRECTIVE_PREFIX}${sandbox.dir}`);
+    await assertRejects(go("HERE", caseSensitive()), "not found");
   });
 
-  it("throws on missing alias", () => {
-    expect(() => go("", dataFile)).toThrow(CommandError);
-    expect(() => go("", dataFile)).toThrow("Usage: tp <alias>");
+  it("goes to the only alias matching a prefix and prefers exact matches", async () => {
+    await add("payment", at(await sandbox.mkdirs("pay")));
+    await add("pas", at(await sandbox.mkdirs("pas")));
+    await add("tx", at(await sandbox.mkdirs("tx")));
+    assert.equal(await path("t", sandbox.context()), join(sandbox.dir, "tx"));
+    await assertRejects(go("pa", sandbox.context()), "Alias 'pa' is ambiguous: pas, payment");
+    await add("pa", sandbox.context());
+    assert.equal(await path("pa", sandbox.context()), sandbox.dir);
   });
 
-  it("throws when alias not found", () => {
-    expect(() => go("nope", dataFile)).toThrow(CommandError);
-    expect(() => go("nope", dataFile)).toThrow("not found");
+  it("resolves sub directories below a bookmark", async () => {
+    await sandbox.mkdirs("app/src/main");
+    await add("app", at(join(sandbox.dir, "app")));
+    assert.equal(await path("app/src/main", sandbox.context()), join(sandbox.dir, "app/src/main"));
+    assert.equal(await path("ap/src", sandbox.context()), join(sandbox.dir, "app/src"));
+    await assertRejects(path("app/nope", sandbox.context()), "Directory does not exist");
   });
 
-  it("matches case-insensitive alias by default", () => {
-    add("rfc", tmpDir, dataFile);
-    expect(go("RFC", dataFile)).toBe(`__TP_CD__:${tmpDir}`);
-    expect(go("Rfc", dataFile)).toBe(`__TP_CD__:${tmpDir}`);
-  });
-
-  it("does not match case-different alias when caseSensitive is true", () => {
-    const config: TpConfig = { caseSensitive: true };
-    add("rfc", tmpDir, dataFile, config);
-    expect(() => go("RFC", dataFile, config)).toThrow("not found");
-  });
-
-  it("throws when directory no longer exists", () => {
-    const bookmarks: Bookmark[] = [
+  it("rejects missing targets and vanished directories", async () => {
+    const file = join(sandbox.dir, "file.txt");
+    await writeFile(file, "");
+    await saveBookmarks(sandbox.dataFile, [
       { alias: "gone", path: "/nonexistent/dir/xyz", createdAt: 1 },
-    ];
-    saveBookmarks(dataFile, bookmarks);
-    expect(() => go("gone", dataFile)).toThrow(CommandError);
-    expect(() => go("gone", dataFile)).toThrow("no longer exists");
+      { alias: "file", path: file, createdAt: 2 },
+    ]);
+    await assertRejects(go(undefined, sandbox.context()), "Usage: tp <alias>");
+    await assertRejects(path(undefined, sandbox.context()), "Usage: tp path");
+    await assertRejects(go("nope", sandbox.context()), "Alias 'nope' not found.");
+    await assertRejects(go("gone", sandbox.context()), "no longer exists");
+    await assertRejects(go("file", sandbox.context()), "no longer exists");
   });
 });
 
 describe("list", () => {
-  it("shows message when no bookmarks", () => {
-    const result = list(dataFile);
-    expect(result).toBe("No bookmarks yet. Use 'tp add <alias>' to add one.");
+  it("explains how to add the first bookmark", async () => {
+    assert.equal(await list({}, sandbox.context()), "No bookmarks yet. Use 'tp add <alias>' to add one.");
   });
 
-  it("lists bookmarks in UTF-8 byte order by default", () => {
-    add("beta", "/b", dataFile);
-    add("alpha", "/a", dataFile);
-    const result = list(dataFile);
-    expect(result).toContain("Bookmarks (UTF-8 order):");
-    expect(result.indexOf("alpha")).toBeLessThan(result.indexOf("beta"));
-  });
-
-  it("sorts uppercase before lowercase and ASCII before Hangul", () => {
-    add("Zebra", "/Z", dataFile);
-    add("apple", "/a", dataFile);
-    add("가나", "/ga", dataFile);
-    const result = list(dataFile);
-    expect(result.indexOf("Zebra")).toBeLessThan(result.indexOf("apple"));
-    expect(result.indexOf("apple")).toBeLessThan(result.indexOf("가나"));
-  });
-
-  it("lists bookmarks newest first when order is recent", () => {
-    add("alpha", "/a", dataFile);
-    add("beta", "/b", dataFile);
-    const result = list(dataFile, "recent");
-    expect(result).toContain("Bookmarks (newest first):");
-    expect(result.indexOf("beta")).toBeLessThan(result.indexOf("alpha"));
-  });
-
-  it("shows paths under the home directory with ~", () => {
-    const home = os.homedir();
-    add("home", home, dataFile);
-    add("nested", path.join(home, "dev", "proj"), dataFile);
-    add("root", "/opt/x", dataFile);
-    const result = list(dataFile);
-    expect(result).toContain("-> ~\n");
-    expect(result).toContain("-> ~/dev/proj");
-    expect(result).toContain("-> /opt/x");
-    expect(loadBookmarks(dataFile).map((b) => b.path)).toEqual([
-      "/opt/x",
-      path.join(home, "dev", "proj"),
-      home,
-    ]);
-  });
-});
-
-describe("shellInit", () => {
-  it("prints the wrapper for every supported shell", () => {
-    for (const shell of SUPPORTED_SHELLS) {
-      expect(shellInit(shell)).toContain("tp-cli");
-      expect(shellInit(shell)).toContain("__TP_CD__:");
+  it("groups bookmarks under their parent directory in UTF-8 order", async () => {
+    for (const dir of ["apps/web", "apps/api", "docs"]) {
+      await add(basename(dir), at(await sandbox.mkdirs(dir)));
     }
-  });
-
-  it("matches the shipped shell file", () => {
-    const shipped = fs.readFileSync(
-      path.join(fileURLToPath(new URL("../..", import.meta.url)), "tp.zsh"),
-      "utf-8",
+    assert.equal(
+      await list({}, sandbox.context()),
+      [
+        "Bookmarks (UTF-8 order):",
+        "",
+        sandbox.dir,
+        "  docs            -> docs",
+        "",
+        join(sandbox.dir, "apps"),
+        "  api             -> api",
+        "  web             -> web",
+      ].join("\n"),
     );
-    expect(shellInit("zsh")).toBe(shipped.trimEnd());
   });
 
-  it("throws when shell is missing", () => {
-    expect(() => shellInit(undefined)).toThrow(CommandError);
-    expect(() => shellInit(undefined)).toThrow("Usage: tp-cli init");
+  it("sorts uppercase before lowercase and ASCII before Hangul", async () => {
+    await add("Zebra", at("/x/Z"));
+    await add("apple", at("/x/a"));
+    await add("가나", at("/x/ga"));
+    const output = await list({}, sandbox.context());
+    assert.ok(output.indexOf("Zebra") < output.indexOf("apple"));
+    assert.ok(output.indexOf("apple") < output.indexOf("가나"));
   });
 
-  it("throws on unsupported shell", () => {
-    expect(() => shellInit("powershell")).toThrow(CommandError);
-    expect(() => shellInit("powershell")).toThrow("bash|zsh|fish|nu");
-  });
-});
-
-describe("completions", () => {
-  it("returns empty string when no bookmarks", () => {
-    const result = completions(dataFile);
-    expect(result).toBe("");
+  it("orders newest first by createdAt", async () => {
+    await saveBookmarks(sandbox.dataFile, [
+      { alias: "old", path: "/a/old", createdAt: 1 },
+      { alias: "new", path: "/b/new", createdAt: 2 },
+    ]);
+    const output = await list({ order: "recent" }, sandbox.context());
+    assertIncludes(output, "Bookmarks (newest first):");
+    assert.ok(output.indexOf("new") < output.indexOf("old"));
   });
 
-  it("returns alias list", () => {
-    add("alpha", "/alpha", dataFile);
-    add("beta", "/beta", dataFile);
-    const result = completions(dataFile);
-    expect(result).toBe("beta\nalpha");
+  it("shows paths under the home directory with ~", async () => {
+    await add("nested", at(join(homedir(), "dev", "proj")));
+    assertIncludes(await list({}, sandbox.context()), "~/dev\n  nested          -> proj");
+  });
+
+  it("filters by alias or path, ignoring case", async () => {
+    await add("api", at("/work/api"));
+    await add("blog", at("/home/blog"));
+    const output = await list({ filter: "WORK" }, sandbox.context());
+    assertIncludes(output, "api");
+    assert.ok(!output.includes("blog"));
+    assert.equal(await list({ filter: "zzz" }, sandbox.context()), "No bookmarks match 'zzz'.");
+  });
+
+  it("marks bookmarks whose directory is missing", async () => {
+    await add("here", sandbox.context());
+    await add("gone", at("/nonexistent/dir"));
+    const output = await list({}, sandbox.context());
+    assertIncludes(output, "gone            -> dir  (missing)");
+    assert.doesNotMatch(output, /here .*\(missing\)/);
   });
 });

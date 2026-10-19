@@ -1,6 +1,6 @@
 {
   "name": "@fru1tworld/tp",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "packageManager": "pnpm@11.7.0",
   "description": "Teleport to bookmarked directories",
   "type": "module",
@@ -9,13 +9,17 @@
     "tp-cli": "dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
-    "test": "vitest run",
-    "test:coverage": "vitest run --coverage",
-    "lint": "biome check src",
-    "lint:fix": "biome check --write src",
-    "format": "biome format --write src",
-    "prepublishOnly": "pnpm run build"
+    "dev": "node src/index.ts",
+    "build": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json && node -e \"fs.chmodSync('dist/index.js',0o755)\"",
+    "typecheck": "tsc",
+    "test": "node --test \"src/**/*.test.ts\"",
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-include=\"src/*.ts\" \"src/**/*.test.ts\"",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "check": "pnpm lint && pnpm typecheck && pnpm knip && pnpm test",
+    "prepublishOnly": "pnpm run build",
+    "knip": "knip"
   },
   "keywords": [
     "cli",
@@ -31,14 +35,14 @@
     "url": "https://github.com/fru1tworld/tp-cli.git"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.6",
-    "@types/node": "^26.1.2",
-    "@vitest/coverage-v8": "^4.1.10",
-    "typescript": "^5.9.3",
-    "vitest": "^4.1.10"
+    "@biomejs/biome": "2.5.8",
+    "@types/node": "24.19.2",
+    "execa": "10.0.1",
+    "knip": "6.39.0",
+    "typescript": "7.0.2"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=24.0.0"
   },
   "files": [
     "dist",
