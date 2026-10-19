@@ -1,14 +1,12 @@
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
+use tui_kit::sqlite;
 
 use crate::appearance::Appearance;
 
-const DATABASE_VERSION: i64 = 1;
+const MIGRATIONS: &[sqlite::Migration] = &[create_settings];
 const APPEARANCE_KEY: &str = "appearance";
 
 pub struct Settings {
@@ -17,12 +15,10 @@ pub struct Settings {
 
 impl Settings {
     pub fn open_default() -> Result<Self> {
-        let path = default_database_path();
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)
-                .with_context(|| format!("Cannot create settings directory: {}", dir.display()))?;
-        }
-        Self::open(&path).with_context(|| format!("Cannot open settings: {}", path.display()))
+        let path = sqlite::database_path("DIFF_TUI_DB", "diff-tui", "settings.db");
+        sqlite::create_parent_dir(&path)
+            .with_context(|| format!("설정 디렉터리를 만들 수 없습니다: {}", path.display()))?;
+        Self::open(&path).with_context(|| format!("설정을 열 수 없습니다: {}", path.display()))
     }
 
     fn open(path: &Path) -> Result<Self> {
@@ -30,35 +26,14 @@ impl Settings {
     }
 
     fn from_connection(connection: Connection) -> Result<Self> {
-        connection.busy_timeout(Duration::from_secs(5))?;
-        connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
-        let settings = Self { connection };
-        settings.migrate()?;
-        Ok(settings)
+        sqlite::configure(&connection)?;
+        sqlite::migrate(&connection, MIGRATIONS)?;
+        Ok(Self { connection })
     }
 
     #[cfg(test)]
     fn in_memory() -> Self {
         Self::from_connection(Connection::open_in_memory().unwrap()).unwrap()
-    }
-
-    fn migrate(&self) -> Result<()> {
-        let current_version: i64 = self
-            .connection
-            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if current_version >= DATABASE_VERSION {
-            return Ok(());
-        }
-        let transaction = self.connection.unchecked_transaction()?;
-        transaction.execute_batch(
-            "CREATE TABLE settings (
-                key    TEXT PRIMARY KEY,
-                value  TEXT NOT NULL
-            );",
-        )?;
-        transaction.pragma_update(None, "user_version", DATABASE_VERSION)?;
-        transaction.commit()?;
-        Ok(())
     }
 
     pub fn appearance(&self) -> Result<Option<Appearance>> {
@@ -83,15 +58,12 @@ impl Settings {
     }
 }
 
-fn default_database_path() -> PathBuf {
-    std::env::var_os("DIFF_TUI_DB").map_or_else(
-        || {
-            dirs::data_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("diff-tui")
-                .join("settings.db")
-        },
-        PathBuf::from,
+fn create_settings(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(
+        "CREATE TABLE settings (
+            key    TEXT PRIMARY KEY,
+            value  TEXT NOT NULL
+        );",
     )
 }
 

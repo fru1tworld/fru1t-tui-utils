@@ -1,98 +1,23 @@
-use std::fmt;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::path::Path;
 
 use anyhow::Context;
-use chrono::{DateTime, Local};
-use rusqlite::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
+use chrono::Local;
+use rusqlite::types::ToSql;
 use rusqlite::{Connection, Result, TransactionBehavior};
-use serde::Serialize;
+use tui_kit::sqlite;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(transparent)]
-pub struct TodoId(pub i64);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(transparent)]
-pub struct ProjectId(pub i64);
-
-impl fmt::Display for TodoId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl fmt::Display for ProjectId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl ToSql for TodoId {
-    fn to_sql(&self) -> Result<ToSqlOutput<'_>> {
-        self.0.to_sql()
-    }
-}
-
-impl ToSql for ProjectId {
-    fn to_sql(&self) -> Result<ToSqlOutput<'_>> {
-        self.0.to_sql()
-    }
-}
-
-impl FromSql for TodoId {
-    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
-        i64::column_result(value).map(Self)
-    }
-}
-
-impl FromSql for ProjectId {
-    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
-        i64::column_result(value).map(Self)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Project {
-    pub id: ProjectId,
-    pub name: String,
-    pub position: i64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Todo {
-    pub id: TodoId,
-    pub text: String,
-    pub created_at: i64,
-    pub done: bool,
-    pub parent_id: Option<TodoId>,
-    #[serde(skip)]
-    pub collapsed: bool,
-    pub position: i64,
-    pub project_id: ProjectId,
-}
-
-impl Todo {
-    pub fn created_at_string(&self) -> String {
-        DateTime::from_timestamp(self.created_at, 0).map_or_else(
-            || "?".to_string(),
-            |dt| {
-                dt.with_timezone(&Local)
-                    .format("%Y-%m-%d %H:%M")
-                    .to_string()
-            },
-        )
-    }
-}
+pub(crate) use crate::domain::{Project, ProjectId, Todo, TodoId};
+use crate::domain::{project_name, todo_text};
+use crate::error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParentCompletion {
+pub(crate) enum ParentCompletion {
     Reopen,
     Keep,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RestoreOutcome {
+pub(crate) enum RestoreOutcome {
     Restored,
     ChangedExternally,
 }
@@ -112,57 +37,37 @@ fn todo_from_row(row: &rusqlite::Row) -> Result<Todo> {
     })
 }
 
-const MIGRATIONS: [fn(&Connection) -> Result<()>; 3] = [migrate_v1, migrate_v2, migrate_v3];
+const MIGRATIONS: &[sqlite::Migration] = &[migrate_v1, migrate_v2, migrate_v3];
 
-pub struct Store {
+pub(crate) struct Store {
     conn: Connection,
 }
 
 impl Store {
-    pub fn open_default() -> anyhow::Result<Self> {
-        let path = default_db_path();
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).with_context(|| {
-                format!("데이터 디렉터리를 만들 수 없습니다: {}", dir.display())
-            })?;
-        }
+    pub(crate) fn open_default() -> anyhow::Result<Self> {
+        let path = sqlite::database_path("TODO_TUI_DB", "todo-tui", "todos.db");
+        sqlite::create_parent_dir(&path)
+            .with_context(|| format!("데이터 디렉터리를 만들 수 없습니다: {}", path.display()))?;
         Self::open(&path).with_context(|| format!("DB를 열 수 없습니다: {}", path.display()))
     }
 
-    pub fn open(path: &Path) -> Result<Self> {
+    pub(crate) fn open(path: &Path) -> Result<Self> {
         Self::from_connection(Connection::open(path)?)
     }
 
     fn from_connection(mut conn: Connection) -> Result<Self> {
         conn.set_transaction_behavior(TransactionBehavior::Immediate);
-        conn.busy_timeout(Duration::from_secs(5))?;
-        conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
-        let store = Self { conn };
-        store.migrate()?;
-        store.conn.pragma_update(None, "foreign_keys", true)?;
-        Ok(store)
+        sqlite::configure(&conn)?;
+        sqlite::migrate(&conn, MIGRATIONS)?;
+        conn.pragma_update(None, "foreign_keys", true)?;
+        Ok(Self { conn })
     }
 
-    fn migrate(&self) -> Result<()> {
-        let current: i64 = self
-            .conn
-            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        for (version, migration) in (1_i64..).zip(MIGRATIONS) {
-            if current < version {
-                let tx = self.conn.unchecked_transaction()?;
-                migration(&tx)?;
-                tx.pragma_update(None, "user_version", version)?;
-                tx.commit()?;
-            }
-        }
-        Ok(())
+    pub(crate) fn data_version(&self) -> Result<i64> {
+        sqlite::data_version(&self.conn)
     }
 
-    pub fn data_version(&self) -> Result<i64> {
-        self.conn.query_row("PRAGMA data_version", [], |r| r.get(0))
-    }
-
-    pub fn list_projects(&self) -> Result<Vec<Project>> {
+    pub(crate) fn list_projects(&self) -> Result<Vec<Project>> {
         let mut stmt = self
             .conn
             .prepare("SELECT id, name, position FROM projects ORDER BY position ASC, id ASC")?;
@@ -176,7 +81,8 @@ impl Store {
         rows.collect()
     }
 
-    pub fn add_project(&self, name: &str) -> Result<ProjectId> {
+    pub(crate) fn add_project(&self, name: &str) -> error::Result<ProjectId> {
+        let name = project_name(name)?;
         let position: i64 = self.conn.query_row(
             "SELECT COALESCE(MAX(position), 0) + 1 FROM projects",
             [],
@@ -189,7 +95,7 @@ impl Store {
         Ok(ProjectId(self.conn.last_insert_rowid()))
     }
 
-    pub fn set_project_positions(&self, order: &[ProjectId]) -> Result<()> {
+    pub(crate) fn set_project_positions(&self, order: &[ProjectId]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         renumber(
             &tx,
@@ -199,21 +105,22 @@ impl Store {
         tx.commit()
     }
 
-    pub fn rename_project(&self, id: ProjectId, name: &str) -> Result<()> {
+    pub(crate) fn rename_project(&self, id: ProjectId, name: &str) -> error::Result<()> {
+        let name = project_name(name)?;
         let changed_rows = self
             .conn
             .execute("UPDATE projects SET name = ?1 WHERE id = ?2", (name, id))?;
-        ensure_row_changed(changed_rows)
+        Ok(ensure_row_changed(changed_rows)?)
     }
 
-    pub fn delete_project(&self, id: ProjectId) -> Result<()> {
+    pub(crate) fn delete_project(&self, id: ProjectId) -> Result<()> {
         let changed_rows = self
             .conn
             .execute("DELETE FROM projects WHERE id = ?1", [id])?;
         ensure_row_changed(changed_rows)
     }
 
-    pub fn list_todos(&self, project_id: ProjectId) -> Result<Vec<Todo>> {
+    pub(crate) fn list_todos(&self, project_id: ProjectId) -> Result<Vec<Todo>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {TODO_COLS} FROM todos WHERE project_id = ?1
              ORDER BY done ASC, position ASC, id ASC"
@@ -226,7 +133,7 @@ impl Store {
         Ok(out)
     }
 
-    pub fn list_all_todos(&self) -> Result<Vec<Todo>> {
+    pub(crate) fn list_all_todos(&self) -> Result<Vec<Todo>> {
         let mut stmt = self
             .conn
             .prepare(&format!("SELECT {TODO_COLS} FROM todos ORDER BY id ASC"))?;
@@ -234,7 +141,7 @@ impl Store {
         rows.collect()
     }
 
-    pub fn restore_if_unchanged(
+    pub(crate) fn restore_if_unchanged(
         &self,
         projects: &[Project],
         todos: &[Todo],
@@ -275,19 +182,21 @@ impl Store {
         Ok(RestoreOutcome::Restored)
     }
 
-    pub fn add_todo(
+    pub(crate) fn add_todo(
         &self,
         text: &str,
         parent_id: Option<TodoId>,
         project_id: ProjectId,
-    ) -> Result<TodoId> {
+    ) -> error::Result<TodoId> {
+        let text = todo_text(text)?;
         let tx = self.conn.unchecked_transaction()?;
         let id = insert_todo(&tx, text, parent_id, project_id)?;
         tx.commit()?;
         Ok(id)
     }
 
-    pub fn add_subtask(&self, text: &str, parent_id: TodoId) -> Result<TodoId> {
+    pub(crate) fn add_subtask(&self, text: &str, parent_id: TodoId) -> error::Result<TodoId> {
+        let text = todo_text(text)?;
         let tx = self.conn.unchecked_transaction()?;
         let project_id: ProjectId = tx.query_row(
             "SELECT project_id FROM todos WHERE id = ?1",
@@ -303,14 +212,15 @@ impl Store {
         Ok(id)
     }
 
-    pub fn update_todo_text(&self, id: TodoId, text: &str) -> Result<()> {
+    pub(crate) fn update_todo_text(&self, id: TodoId, text: &str) -> error::Result<()> {
+        let text = todo_text(text)?;
         let changed_rows = self
             .conn
             .execute("UPDATE todos SET text = ?1 WHERE id = ?2", (text, id))?;
-        ensure_row_changed(changed_rows)
+        Ok(ensure_row_changed(changed_rows)?)
     }
 
-    pub fn set_done_many(&self, updates: &[(TodoId, bool)]) -> Result<()> {
+    pub(crate) fn set_done_many(&self, updates: &[(TodoId, bool)]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         {
             let mut stmt = tx.prepare("UPDATE todos SET done = ?1 WHERE id = ?2")?;
@@ -321,7 +231,7 @@ impl Store {
         tx.commit()
     }
 
-    pub fn indent(
+    pub(crate) fn indent(
         &self,
         id: TodoId,
         parent: TodoId,
@@ -340,13 +250,13 @@ impl Store {
         tx.commit()
     }
 
-    pub fn set_todo_positions(&self, order: &[TodoId]) -> Result<()> {
+    pub(crate) fn set_todo_positions(&self, order: &[TodoId]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         renumber(&tx, "UPDATE todos SET position = ?1 WHERE id = ?2", order)?;
         tx.commit()
     }
 
-    pub fn move_to_project(
+    pub(crate) fn move_to_project(
         &self,
         root: TodoId,
         subtree: &[TodoId],
@@ -367,7 +277,7 @@ impl Store {
         tx.commit()
     }
 
-    pub fn outdent(
+    pub(crate) fn outdent(
         &self,
         id: TodoId,
         new_parent: Option<TodoId>,
@@ -386,7 +296,7 @@ impl Store {
         tx.commit()
     }
 
-    pub fn set_collapsed(&self, id: TodoId, collapsed: bool) -> Result<()> {
+    pub(crate) fn set_collapsed(&self, id: TodoId, collapsed: bool) -> Result<()> {
         let changed_rows = self.conn.execute(
             "UPDATE todos SET collapsed = ?1 WHERE id = ?2",
             (collapsed, id),
@@ -394,7 +304,7 @@ impl Store {
         ensure_row_changed(changed_rows)
     }
 
-    pub fn delete_todo(&self, id: TodoId) -> Result<()> {
+    pub(crate) fn delete_todo(&self, id: TodoId) -> Result<()> {
         let changed_rows = self.conn.execute("DELETE FROM todos WHERE id = ?1", [id])?;
         ensure_row_changed(changed_rows)
     }
@@ -561,13 +471,6 @@ fn column_names(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn.prepare("PRAGMA table_info(todos)")?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
     rows.collect()
-}
-
-fn default_db_path() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("todo-tui")
-        .join("todos.db")
 }
 
 #[cfg(test)]
@@ -888,5 +791,17 @@ mod tests {
             RestoreOutcome::Restored
         );
         assert_eq!(texts(&s, pid), ["b", "a"]);
+    }
+
+    #[test]
+    fn blank_text_is_rejected_and_text_is_trimmed() {
+        let s = mem_store();
+        let pid = default_project(&s);
+        assert!(s.add_todo("  ", None, pid).is_err());
+        assert!(s.add_project("\t").is_err());
+
+        let id = s.add_todo("  장보기  ", None, pid).unwrap();
+        assert!(s.update_todo_text(id, " ").is_err());
+        assert_eq!(texts(&s, pid), ["장보기"]);
     }
 }

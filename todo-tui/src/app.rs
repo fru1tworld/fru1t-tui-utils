@@ -1,25 +1,28 @@
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::ListState;
 use tui_input::Input;
+use tui_kit::clipboard;
+use tui_kit::mode::Mode;
+use tui_kit::undo::UndoHistory;
 
-use crate::action::{Action, Flow};
-use crate::clipboard;
-use crate::db::{ParentCompletion, Project, ProjectId, RestoreOutcome, Store, Todo, TodoId};
+use crate::action::{Action, Flow, map_key};
+use crate::db::{ParentCompletion, RestoreOutcome, Store};
 use crate::dialog::{Popup, PopupKind};
+use crate::domain::{self, Project, ProjectId, Todo, TodoId};
 use crate::error::{Error, Result};
 use crate::tree::{self, MAX_DEPTH};
-use crate::undo::{Snapshot, UndoHistory};
 
 const UNDO_LIMIT: usize = 5;
 pub(crate) const PROJECT_LIMIT: usize = 5;
 
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) enum Mode {
-    Insert,
-    Normal,
+struct Snapshot {
+    projects: Vec<Project>,
+    todos: Vec<Todo>,
+    data_version: i64,
 }
 
 pub(crate) struct App {
-    pub(crate) store: Store,
+    store: Store,
     pub(crate) projects: Vec<Project>,
     pub(crate) active_project_id: ProjectId,
     pub(crate) todos: Vec<Todo>,
@@ -30,7 +33,7 @@ pub(crate) struct App {
     pub(crate) popup: Option<Popup>,
     pub(crate) status: String,
     pub(crate) tab_held: bool,
-    undo_history: UndoHistory,
+    undo_history: UndoHistory<Snapshot>,
     data_version: i64,
 }
 
@@ -43,14 +46,6 @@ fn rotate<Id: Copy + PartialEq>(order: &[Id], id: Id, delta: isize) -> Option<Ve
     let mut out: Vec<Id> = order.iter().copied().filter(|&x| x != id).collect();
     out.insert(j, id);
     Some(out)
-}
-
-fn required<'a>(text: &'a str, missing: &str) -> Result<&'a str> {
-    let text = text.trim();
-    if text.is_empty() {
-        return Err(Error::Invalid(missing.into()));
-    }
-    Ok(text)
 }
 
 impl App {
@@ -84,7 +79,18 @@ impl App {
         Ok(())
     }
 
-    pub(crate) fn hold_tab(&mut self) {
+    pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<Flow> {
+        let action = map_key(self, key);
+        if key.code != KeyCode::Tab && !matches!(key.code, KeyCode::Left | KeyCode::Right) {
+            self.tab_held = false;
+        }
+        match action {
+            Some(action) => self.apply(action),
+            None => Ok(Flow::Continue),
+        }
+    }
+
+    fn hold_tab(&mut self) {
         self.tab_held = true;
         self.status = "←→ 메모를 옆 탭으로 보내기 · 다른 키를 누르면 해제".into();
     }
@@ -92,6 +98,7 @@ impl App {
     pub(crate) fn apply(&mut self, action: Action) -> Result<Flow> {
         match action {
             Action::Quit => return Ok(Flow::Quit),
+            Action::HoldTab => self.hold_tab(),
             Action::EnterInsert => self.mode = Mode::Insert,
             Action::EnterNormal => self.mode = Mode::Normal,
             Action::Input(req) => {
@@ -558,7 +565,7 @@ impl App {
     }
 
     fn commit_subtask(&mut self, parent_id: TodoId, text: &str) -> Result<()> {
-        let text = required(text, "내용을 입력하세요")?;
+        let text = domain::todo_text(text)?;
         self.push_undo()?;
         let id = self.store.add_subtask(text, parent_id)?;
         self.reload()?;
@@ -568,7 +575,7 @@ impl App {
     }
 
     fn commit_edit(&mut self, id: TodoId, text: &str) -> Result<()> {
-        let text = required(text, "내용을 입력하세요")?;
+        let text = domain::todo_text(text)?;
         self.push_undo()?;
         self.store.update_todo_text(id, text)?;
         self.reload()?;
@@ -577,7 +584,7 @@ impl App {
     }
 
     fn commit_new_project(&mut self, name: &str) -> Result<()> {
-        let name = required(name, "이름을 입력하세요")?;
+        let name = domain::project_name(name)?;
         if self.projects.len() >= PROJECT_LIMIT {
             return Err(Error::Invalid(format!(
                 "프로젝트는 최대 {PROJECT_LIMIT}개까지예요"
@@ -592,7 +599,7 @@ impl App {
     }
 
     fn commit_rename_project(&mut self, id: ProjectId, name: &str) -> Result<()> {
-        let name = required(name, "이름을 입력하세요")?;
+        let name = domain::project_name(name)?;
         self.push_undo()?;
         self.store.rename_project(id, name)?;
         self.reload()?;
@@ -1155,5 +1162,25 @@ mod tests {
         ] {
             let _ = std::fs::remove_file(path);
         }
+    }
+
+    #[test]
+    fn tab_then_arrow_sends_the_todo_and_other_keys_release_the_hold() {
+        use ratatui::crossterm::event::KeyModifiers;
+
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let mut app = app_with_todos(1);
+        app.store.add_project("업무").unwrap();
+        app.reload().unwrap();
+        app.mode = Mode::Normal;
+
+        app.handle_key(key(KeyCode::Tab)).unwrap();
+        assert!(app.tab_held);
+        app.handle_key(key(KeyCode::Right)).unwrap();
+        assert!(app.tab_held);
+        assert!(app.todos.is_empty());
+
+        app.handle_key(key(KeyCode::Char('j'))).unwrap();
+        assert!(!app.tab_held);
     }
 }

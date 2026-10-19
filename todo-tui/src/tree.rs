@@ -1,6 +1,6 @@
 use std::iter;
 
-use crate::db::{Todo, TodoId};
+use crate::domain::{Todo, TodoId};
 
 pub(crate) const MAX_DEPTH: usize = 3;
 

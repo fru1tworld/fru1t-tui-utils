@@ -1,7 +1,9 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tui_input::InputRequest;
+use tui_kit::keys::text_edit_request;
+use tui_kit::mode::Mode;
 
-use crate::app::{App, Mode};
+use crate::app::App;
 
 pub(crate) enum Flow {
     Continue,
@@ -29,30 +31,6 @@ pub(crate) enum Action {
     EditDialogInput(InputRequest),
     CommitEditDialog,
     CancelEditDialog,
-}
-
-fn text_edit_request(key: KeyEvent) -> Option<InputRequest> {
-    use InputRequest::*;
-
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    Some(match key.code {
-        KeyCode::Backspace if ctrl => DeletePrevWord,
-        KeyCode::Backspace => DeletePrevChar,
-        KeyCode::Delete => DeleteNextChar,
-        KeyCode::Left if ctrl => GoToPrevWord,
-        KeyCode::Right if ctrl => GoToNextWord,
-        KeyCode::Left => GoToPrevChar,
-        KeyCode::Right => GoToNextChar,
-        KeyCode::Home => GoToStart,
-        KeyCode::End => GoToEnd,
-        KeyCode::Char('w') if ctrl => DeletePrevWord,
-        KeyCode::Char('u') if ctrl => DeleteLine,
-        KeyCode::Char('a') if ctrl => GoToStart,
-        KeyCode::Char('e') if ctrl => GoToEnd,
-        KeyCode::Char('k') if ctrl => DeleteTillEnd,
-        KeyCode::Char(character) if !ctrl => InsertChar(character),
-        _ => return None,
-    })
 }
 
 pub(crate) fn map_key(app: &App, key: KeyEvent) -> Option<Action> {

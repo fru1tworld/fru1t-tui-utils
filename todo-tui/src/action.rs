@@ -1,11 +1,14 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tui_input::InputRequest;
+use tui_kit::keys::{is_shift_enter, text_edit_request};
+use tui_kit::mode::Mode;
 
-use crate::app::{App, Mode};
+use crate::app::App;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Action {
     Quit,
+    HoldTab,
     EnterInsert,
     EnterNormal,
     Input(InputRequest),
@@ -38,30 +41,6 @@ pub(crate) enum Flow {
     Quit,
 }
 
-fn edit_request(key: KeyEvent) -> Option<InputRequest> {
-    use InputRequest::*;
-
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    Some(match key.code {
-        KeyCode::Backspace if ctrl => DeletePrevWord,
-        KeyCode::Backspace => DeletePrevChar,
-        KeyCode::Delete => DeleteNextChar,
-        KeyCode::Left if ctrl => GoToPrevWord,
-        KeyCode::Right if ctrl => GoToNextWord,
-        KeyCode::Left => GoToPrevChar,
-        KeyCode::Right => GoToNextChar,
-        KeyCode::Home => GoToStart,
-        KeyCode::End => GoToEnd,
-        KeyCode::Char('w') if ctrl => DeletePrevWord,
-        KeyCode::Char('u') if ctrl => DeleteLine,
-        KeyCode::Char('a') if ctrl => GoToStart,
-        KeyCode::Char('e') if ctrl => GoToEnd,
-        KeyCode::Char('k') if ctrl => DeleteTillEnd,
-        KeyCode::Char(c) if !ctrl => InsertChar(c),
-        _ => return None,
-    })
-}
-
 pub(crate) fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
     use Action::*;
     use KeyCode::{Char, Down, Enter, Esc, Left, Right, Up};
@@ -69,20 +48,26 @@ pub(crate) fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
-    if app.popup.is_some() {
+    if let Some(popup) = &app.popup {
         return match key.code {
             Esc => Some(PopupCancel),
+            Enter if is_shift_enter(key) && popup.kind.is_multiline() => {
+                Some(PopupInput(InputRequest::InsertChar('\n')))
+            }
             Enter => Some(PopupCommit),
-            _ => edit_request(key).map(PopupInput),
+            _ => text_edit_request(key).map(PopupInput),
         };
     }
 
+    if key.code == KeyCode::Tab {
+        return Some(HoldTab);
+    }
     if app.tab_held {
-        return match key.code {
-            Left => Some(MoveToProject(-1)),
-            Right => Some(MoveToProject(1)),
-            _ => None,
-        };
+        match key.code {
+            Left => return Some(MoveToProject(-1)),
+            Right => return Some(MoveToProject(1)),
+            _ => {}
+        }
     }
 
     let arrows_move_cursor = app.mode == Mode::Insert && !app.input.value().is_empty();
@@ -108,7 +93,7 @@ pub(crate) fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
         Mode::Insert => match key.code {
             Esc => Some(EnterNormal),
             Enter => Some(CommitInsert),
-            _ => edit_request(key).map(Input),
+            _ => text_edit_request(key).map(Input),
         },
         Mode::Normal => Some(match key.code {
             Char('q') => Quit,
@@ -133,5 +118,49 @@ pub(crate) fn map_key(app: &App, key: KeyEvent) -> Option<Action> {
             Char('h') => Collapse,
             _ => return None,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tui_input::Input;
+
+    use super::*;
+    use crate::db::Store;
+    use crate::dialog::{Popup, PopupKind};
+    use crate::domain::ProjectId;
+
+    fn app_with_popup(kind: PopupKind) -> App {
+        let mut app = App::new(Store::open(std::path::Path::new(":memory:")).unwrap()).unwrap();
+        app.popup = Some(Popup {
+            kind,
+            input: Input::default(),
+        });
+        app
+    }
+
+    #[test]
+    fn shift_enter_adds_a_newline_only_in_multiline_popups() {
+        let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+
+        let app = app_with_popup(PopupKind::NewProject);
+        assert!(matches!(
+            map_key(&app, shift_enter),
+            Some(Action::PopupCommit)
+        ));
+
+        let app = app_with_popup(PopupKind::RenameProject { id: ProjectId(1) });
+        assert!(matches!(
+            map_key(&app, shift_enter),
+            Some(Action::PopupCommit)
+        ));
+
+        let app = app_with_popup(PopupKind::AddSubtask {
+            parent_id: crate::domain::TodoId(1),
+        });
+        assert!(matches!(
+            map_key(&app, shift_enter),
+            Some(Action::PopupInput(InputRequest::InsertChar('\n')))
+        ));
     }
 }

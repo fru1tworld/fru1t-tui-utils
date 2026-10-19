@@ -1,13 +1,13 @@
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::path::Path;
 
 use chrono::{Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike};
 use rusqlite::Connection;
+use tui_kit::sqlite;
 
 use crate::domain::{EntryId, TilEntry, validate_content};
 use crate::error::{Error, Result};
 
-const DATABASE_VERSION: i64 = 1;
+const MIGRATIONS: &[sqlite::Migration] = &[create_entries];
 
 pub(crate) struct SqliteTilRepository {
     connection: Connection,
@@ -15,10 +15,8 @@ pub(crate) struct SqliteTilRepository {
 
 impl SqliteTilRepository {
     pub(crate) fn open_default() -> Result<Self> {
-        let path = default_database_path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let path = sqlite::database_path("TIL_TUI_DB", "til-tui", "til.db");
+        sqlite::create_parent_dir(&path)?;
         Self::open(path)
     }
 
@@ -27,11 +25,9 @@ impl SqliteTilRepository {
     }
 
     fn from_connection(connection: Connection) -> Result<Self> {
-        connection.busy_timeout(Duration::from_secs(5))?;
-        connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
-        let repository = Self { connection };
-        repository.migrate()?;
-        Ok(repository)
+        sqlite::configure(&connection)?;
+        sqlite::migrate(&connection, MIGRATIONS)?;
+        Ok(Self { connection })
     }
 
     #[cfg(test)]
@@ -40,32 +36,8 @@ impl SqliteTilRepository {
             .expect("인메모리 DB 마이그레이션")
     }
 
-    fn migrate(&self) -> Result<()> {
-        let current_version: i64 = self
-            .connection
-            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if current_version >= DATABASE_VERSION {
-            return Ok(());
-        }
-
-        let transaction = self.connection.unchecked_transaction()?;
-        transaction.execute_batch(
-            "CREATE TABLE entries (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                text        TEXT    NOT NULL,
-                created_at  INTEGER NOT NULL
-            );
-            CREATE INDEX entries_created_at_idx ON entries(created_at);",
-        )?;
-        transaction.pragma_update(None, "user_version", DATABASE_VERSION)?;
-        transaction.commit()?;
-        Ok(())
-    }
-
     pub(crate) fn data_version(&self) -> Result<i64> {
-        Ok(self
-            .connection
-            .query_row("PRAGMA data_version", [], |row| row.get(0))?)
+        Ok(sqlite::data_version(&self.connection)?)
     }
 
     pub(crate) fn entries_on(&self, date: NaiveDate) -> Result<Vec<TilEntry>> {
@@ -197,15 +169,14 @@ fn local_day_bounds(date: NaiveDate) -> Result<(i64, i64)> {
     Ok((start, end))
 }
 
-fn default_database_path() -> PathBuf {
-    std::env::var_os("TIL_TUI_DB").map_or_else(
-        || {
-            dirs::data_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("til-tui")
-                .join("til.db")
-        },
-        PathBuf::from,
+fn create_entries(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(
+        "CREATE TABLE entries (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            text        TEXT    NOT NULL,
+            created_at  INTEGER NOT NULL
+        );
+        CREATE INDEX entries_created_at_idx ON entries(created_at);",
     )
 }
 

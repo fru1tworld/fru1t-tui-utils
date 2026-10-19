@@ -1,11 +1,13 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use chrono::{Duration, Local, NaiveDate};
 use ratatui::widgets::ListState;
 use tui_input::Input;
+use tui_kit::clipboard;
+use tui_kit::mode::Mode;
+use tui_kit::undo::UndoHistory;
 
 use crate::action::{Action, Flow};
-use crate::clipboard;
 use crate::db::SqliteTilRepository;
 use crate::domain::{EntryId, TilEntry, validate_content};
 use crate::error::{Error, Result};
@@ -13,12 +15,6 @@ use crate::output;
 use crate::week::CalendarWeek;
 
 const UNDO_LIMIT: usize = 5;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Mode {
-    Insert,
-    Normal,
-}
 
 pub(crate) struct EditDialog {
     pub(crate) entry_id: EntryId,
@@ -41,7 +37,6 @@ pub(crate) enum VisibleRow {
     },
 }
 
-#[derive(Clone)]
 enum UndoOperation {
     DeleteCreated {
         entry_id: EntryId,
@@ -77,7 +72,7 @@ pub(crate) struct App {
     pub(crate) edit_dialog: Option<EditDialog>,
     pub(crate) status: String,
     collapsed_dates: HashSet<NaiveDate>,
-    undo_history: VecDeque<UndoOperation>,
+    undo_history: UndoHistory<UndoOperation>,
     data_version: i64,
 }
 
@@ -95,7 +90,7 @@ impl App {
             edit_dialog: None,
             status: String::new(),
             collapsed_dates: HashSet::new(),
-            undo_history: VecDeque::new(),
+            undo_history: UndoHistory::new(UNDO_LIMIT),
             data_version: 0,
         };
         app.refresh(Some(RowKey::Date(today)))?;
@@ -278,19 +273,16 @@ impl App {
     }
 
     fn remember(&mut self, operation: UndoOperation) {
-        if self.undo_history.len() >= UNDO_LIMIT {
-            self.undo_history.pop_front();
-        }
-        self.undo_history.push_back(operation);
+        self.undo_history.remember(operation);
     }
 
     fn undo(&mut self) -> Result<()> {
-        let Some(operation) = self.undo_history.back().cloned() else {
+        let Some(operation) = self.undo_history.latest() else {
             self.status = "되돌릴 작업이 없어요".into();
             return Ok(());
         };
 
-        let preferred_row = match operation {
+        let preferred_row = match *operation {
             UndoOperation::DeleteCreated { entry_id } => {
                 self.repository.delete(entry_id)?;
                 RowKey::Date(self.selected_date)
@@ -317,7 +309,7 @@ impl App {
             }
         };
 
-        self.undo_history.pop_back();
+        self.undo_history.discard_latest();
         self.refresh(Some(preferred_row))?;
         self.status = format!("되돌림 (남은 {}개)", self.undo_history.len());
         Ok(())

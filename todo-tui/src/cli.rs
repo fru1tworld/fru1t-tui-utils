@@ -2,7 +2,8 @@ use clap::{Parser, Subcommand};
 
 use anyhow::{Context, anyhow, bail};
 
-use crate::db::{ProjectId, Store, Todo, TodoId};
+use crate::db::Store;
+use crate::domain::{ProjectId, Todo, TodoId};
 use crate::tree::{self, MAX_DEPTH};
 
 #[derive(Parser)]

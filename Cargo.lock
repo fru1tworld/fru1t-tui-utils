@@ -445,10 +445,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "dirs",
  "ratatui",
  "rusqlite",
  "similar",
+ "tui-kit",
  "two-face",
  "unicode-segmentation",
  "unicode-width",
@@ -1866,14 +1866,13 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
- "dirs",
  "ratatui",
  "rusqlite",
  "serde",
  "serde_json",
- "textwrap",
  "thiserror 2.0.20",
  "tui-input",
+ "tui-kit",
  "unicode-width",
 ]
 
@@ -1905,14 +1904,13 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
- "dirs",
  "ratatui",
  "rusqlite",
  "serde",
  "serde_json",
- "textwrap",
  "thiserror 2.0.20",
  "tui-input",
+ "tui-kit",
  "unicode-width",
 ]
 
@@ -1923,6 +1921,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4eb7c7ddaef6dcc58fae905d0f89a3df49ef77e93822df7447a5bb0babc9ece3"
 dependencies = [
  "unicode-segmentation",
+ "unicode-width",
+]
+
+[[package]]
+name = "tui-kit"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "ratatui",
+ "rusqlite",
+ "textwrap",
+ "tui-input",
  "unicode-width",
 ]
 

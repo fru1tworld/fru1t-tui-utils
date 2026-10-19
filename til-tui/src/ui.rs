@@ -1,35 +1,77 @@
 use chrono::{Datelike, Weekday};
 use ratatui::{
     Frame,
-    layout::{Constraint, Flex, Layout, Position, Rect},
+    layout::{Constraint, Layout},
     style::{Style, Stylize},
     text::{Line, Span},
     widgets::{Block, BorderType, Clear, List, ListItem, Paragraph},
 };
-use tui_input::Input;
+use tui_kit::input::{input_box, input_cursor};
+use tui_kit::layout::{KeyHint, centered_rect, key_hint_lines, render_if_too_small};
+use tui_kit::mode::Mode;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, Mode, VisibleRow};
+use crate::app::{App, VisibleRow};
 use crate::domain::TilEntry;
 
+const MIN_SIZE: (u16, u16) = (40, 12);
+const INSERT_PANEL_HEIGHT: u16 = 8;
+const KEY_HINTS: &[&[KeyHint]] = &[
+    &[
+        ("i", "입력"),
+        ("e", "편집"),
+        ("d", "삭제"),
+        ("u", "되돌리기"),
+        ("y", "복사"),
+        ("o", "출력"),
+    ],
+    &[
+        ("↑↓", "선택"),
+        ("←→", "주 이동"),
+        ("t", "오늘"),
+        ("Enter", "접기/펼치기"),
+        ("Shift+←→", "기록 날짜 이동"),
+        ("q", "종료"),
+    ],
+];
+
 pub(crate) fn render(frame: &mut Frame, app: &mut App) {
+    if render_if_too_small(frame, MIN_SIZE, "터미널을 40 x 12 이상으로 늘려 주세요") {
+        return;
+    }
+    let inner_width = frame.area().width.saturating_sub(2);
+    let hints = key_hint_lines(KEY_HINTS, inner_width);
+    let bottom_height = match app.mode {
+        Mode::Insert => INSERT_PANEL_HEIGHT,
+        Mode::Normal => hints.len() as u16 + 3,
+    };
     let [top, middle, bottom] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(2),
-        Constraint::Length(8),
+        Constraint::Length(bottom_height),
     ])
     .areas(frame.area());
 
     frame.render_widget(title(app), top);
     frame.render_stateful_widget(entry_list(app, middle.width), middle, &mut app.selection);
-    frame.render_widget(bottom_panel(app, bottom), bottom);
+    match app.mode {
+        Mode::Insert => frame.render_widget(
+            input_box(
+                "배운 내용 · Enter 추가 · Shift+Enter 개행 · ←→ 주 이동 · 'out' 출력 · Esc 명령모드",
+                &app.input,
+                bottom,
+            ),
+            bottom,
+        ),
+        Mode::Normal => frame.render_widget(help_panel(app, hints), bottom),
+    }
 
     let focused_input = if let Some(dialog) = &app.edit_dialog {
         let area = centered_rect(70, 8, frame.area());
         frame.render_widget(Clear, area);
         frame.render_widget(
             input_box(
-                "기록 편집 (Enter 저장 · Shift+Enter 개행 · Esc 취소)",
+                "기록 편집 · Enter 저장 · Shift+Enter 개행 · Esc 취소",
                 &dialog.input,
                 area,
             ),
@@ -47,10 +89,6 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App) {
 }
 
 fn title(app: &App) -> Paragraph<'static> {
-    let mode = match app.mode {
-        Mode::Insert => "-- INSERT --".green().bold(),
-        Mode::Normal => "-- NORMAL --".blue().bold(),
-    };
     let today = chrono::Local::now().date_naive();
     let selected_date = if app.selected_date == today {
         format!("{} (오늘)", app.selected_date)
@@ -60,6 +98,8 @@ fn title(app: &App) -> Paragraph<'static> {
     let week = app.calendar_week();
     Paragraph::new(Line::from(vec![
         " TIL ".cyan().bold(),
+        app.mode.badge(),
+        Span::raw(" "),
         format!(
             " {} · {}~{} ",
             week.label(),
@@ -69,8 +109,7 @@ fn title(app: &App) -> Paragraph<'static> {
         .cyan()
         .bold()
         .reversed(),
-        format!(" 선택 {selected_date} · {}개  ", app.week_entry_count()).dim(),
-        mode,
+        format!(" 선택 {selected_date} · {}개", app.week_entry_count()).dim(),
     ]))
     .block(Block::bordered().border_type(BorderType::Rounded))
 }
@@ -112,11 +151,8 @@ fn date_item(app: &App, group_index: usize) -> ListItem<'static> {
     } else {
         "▾"
     };
-    let today = if group.date == chrono::Local::now().date_naive() {
-        " (오늘)"
-    } else {
-        ""
-    };
+    let is_today = group.date == chrono::Local::now().date_naive();
+    let today = if is_today { " (오늘)" } else { "" };
     let weekday = match group.date.weekday() {
         Weekday::Mon => "월",
         Weekday::Tue => "화",
@@ -126,10 +162,16 @@ fn date_item(app: &App, group_index: usize) -> ListItem<'static> {
         Weekday::Sat => "토",
         Weekday::Sun => "일",
     };
+    let heading = format!("{caret} {} ({weekday}){today}", group.date);
+    let heading = if is_today {
+        heading.yellow().bold()
+    } else if group.entries.is_empty() {
+        heading.dim()
+    } else {
+        heading.cyan().bold()
+    };
     ListItem::new(Line::from(vec![
-        format!("{caret} {} ({weekday}){today}", group.date)
-            .cyan()
-            .bold(),
+        heading,
         format!("  {}개", group.entries.len()).dim(),
     ]))
 }
@@ -141,15 +183,8 @@ fn entry_item(entry: &TilEntry, width: usize, is_last: bool) -> ListItem<'static
     let continuation = " ".repeat(prefix_width);
     let available = width.saturating_sub(prefix_width).max(8);
 
-    let chunks = entry.content.split('\n').flat_map(|source_line| {
-        let chunks = textwrap::wrap(source_line.trim_end_matches('\r'), available);
-        if chunks.is_empty() {
-            vec![String::new()]
-        } else {
-            chunks.into_iter().map(|chunk| chunk.into_owned()).collect()
-        }
-    });
-    let lines = chunks
+    let lines = tui_kit::text::wrap(&entry.content, available)
+        .into_iter()
         .enumerate()
         .map(|(index, chunk)| {
             let line_prefix = if index == 0 {
@@ -163,105 +198,11 @@ fn entry_item(entry: &TilEntry, width: usize, is_last: bool) -> ListItem<'static
     ListItem::new(lines)
 }
 
-fn bottom_panel(app: &App, area: Rect) -> Paragraph<'_> {
-    match app.mode {
-        Mode::Insert => input_box(
-            "배운 내용 (←→ 주 이동 · Enter 추가 · Shift+Enter 개행 · 'out' 출력 · Esc 명령모드)",
-            &app.input,
-            area,
-        ),
-        Mode::Normal => {
-            let mut lines = vec![
-                Line::from("i 입력   e 편집   d 삭제   u 되돌리기   y 복사   o 출력"),
-                Line::from(
-                    "←→ 주 이동   Enter 날짜 접기/펼치기   t 오늘   Shift+←→ 기록 날짜 이동   ↑↓ 선택   q 종료",
-                ),
-            ];
-            if !app.status.is_empty() {
-                lines.push(Line::from(app.status.clone().yellow()));
-            }
-            Paragraph::new(lines).dim().block(
-                Block::bordered()
-                    .border_type(BorderType::Rounded)
-                    .title(" 안내 "),
-            )
-        }
-    }
-}
-
-fn input_box<'a>(title: &'a str, input: &'a Input, area: Rect) -> Paragraph<'a> {
-    let (vertical_scroll, horizontal_scroll) = input_scroll(area, input);
-    Paragraph::new(input.value())
-        .block(
-            Block::bordered()
-                .border_type(BorderType::Rounded)
-                .title(format!(" {title} ")),
-        )
-        .scroll((vertical_scroll, horizontal_scroll))
-}
-
-fn input_cursor(area: Rect, input: &Input) -> Position {
-    let (row, column) = input_position(input);
-    let (vertical_scroll, horizontal_scroll) = input_scroll(area, input);
-    Position {
-        x: (area.x + 1 + column.saturating_sub(horizontal_scroll as usize) as u16)
-            .min(area.right().saturating_sub(2)),
-        y: (area.y + 1 + row.saturating_sub(vertical_scroll as usize) as u16)
-            .min(area.bottom().saturating_sub(2)),
-    }
-}
-
-fn input_position(input: &Input) -> (usize, usize) {
-    let before_cursor = input
-        .value()
-        .chars()
-        .take(input.cursor())
-        .collect::<String>();
-    let row = before_cursor
-        .chars()
-        .filter(|character| *character == '\n')
-        .count();
-    let column = before_cursor.rsplit('\n').next().unwrap_or("").width();
-    (row, column)
-}
-
-fn input_scroll(area: Rect, input: &Input) -> (u16, u16) {
-    let (row, column) = input_position(input);
-    let inner_height = area.height.saturating_sub(2).max(1) as usize;
-    let inner_width = area.width.saturating_sub(2).max(1) as usize;
-    (
-        row.saturating_sub(inner_height - 1) as u16,
-        column.saturating_sub(inner_width - 1) as u16,
+fn help_panel(app: &App, mut lines: Vec<Line<'static>>) -> Paragraph<'static> {
+    lines.push(Line::from(app.status.clone().yellow()));
+    Paragraph::new(lines).block(
+        Block::bordered()
+            .border_type(BorderType::Rounded)
+            .title(" 안내 "),
     )
-}
-
-fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
-    let [horizontal] = Layout::horizontal([Constraint::Percentage(percent_x)])
-        .flex(Flex::Center)
-        .areas(area);
-    let [vertical] = Layout::vertical([Constraint::Length(height)])
-        .flex(Flex::Center)
-        .areas(horizontal);
-    vertical
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn multiline_cursor_uses_the_current_lines_unicode_width() {
-        let input = Input::new("첫 줄\nLens 🔍".into());
-
-        assert_eq!(input_position(&input), (1, 7));
-    }
-
-    #[test]
-    fn multiline_input_scrolls_to_keep_the_cursor_visible() {
-        let input = Input::new("1\n2\n3\n4\n5\n6\n7".into());
-        let area = Rect::new(0, 0, 20, 6);
-
-        assert_eq!(input_scroll(area, &input), (3, 0));
-        assert_eq!(input_cursor(area, &input), Position { x: 2, y: 4 });
-    }
 }

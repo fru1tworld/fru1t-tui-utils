@@ -1,7 +1,6 @@
 mod action;
 mod app;
 mod cli;
-mod clipboard;
 mod db;
 mod domain;
 mod error;
@@ -18,14 +17,7 @@ use clap::Parser;
 use db::SqliteTilRepository;
 use ratatui::{
     DefaultTerminal,
-    crossterm::{
-        cursor::SetCursorStyle,
-        event::{
-            self, Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-            PushKeyboardEnhancementFlags,
-        },
-        execute,
-    },
+    crossterm::event::{self, Event, KeyEventKind},
 };
 
 fn main() -> anyhow::Result<()> {
@@ -36,21 +28,7 @@ fn main() -> anyhow::Result<()> {
 
     let repository = SqliteTilRepository::open_default()?;
     let mut app = App::new(repository)?;
-    let mut terminal = ratatui::init();
-    let _ = execute!(
-        io::stdout(),
-        SetCursorStyle::BlinkingBar,
-        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-    );
-
-    let result = run(&mut terminal, &mut app);
-
-    let _ = execute!(
-        io::stdout(),
-        PopKeyboardEnhancementFlags,
-        SetCursorStyle::DefaultUserShape
-    );
-    ratatui::restore();
+    let result = tui_kit::terminal::run(|terminal| run(terminal, &mut app))?;
 
     if let Some(text) = result? {
         print!("{text}");

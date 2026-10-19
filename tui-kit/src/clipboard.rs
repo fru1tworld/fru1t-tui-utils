@@ -8,7 +8,8 @@ const COMMANDS: &[(&str, &[&str])] = &[
     ("xsel", &["--clipboard", "--input"]),
 ];
 
-pub(crate) fn copy(text: &str) -> Result<(), String> {
+/// Copies `text` with the first clipboard command that succeeds.
+pub fn copy(text: &str) -> Result<(), String> {
     let mut last_error = None;
     for (program, args) in COMMANDS {
         match write_to(program, args, text) {
@@ -16,7 +17,8 @@ pub(crate) fn copy(text: &str) -> Result<(), String> {
             Err(reason) => last_error = Some(format!("{program}: {reason}")),
         }
     }
-    Err(last_error.unwrap_or_else(|| "사용 가능한 클립보드 명령이 없어요".into()))
+    Err(last_error
+        .unwrap_or_else(|| "클립보드 명령을 찾을 수 없어요 (pbcopy/wl-copy/xclip/xsel)".into()))
 }
 
 fn write_to(program: &str, args: &[&str], text: &str) -> Result<(), String> {
@@ -26,25 +28,26 @@ fn write_to(program: &str, args: &[&str], text: &str) -> Result<(), String> {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| error.to_string())?;
 
     let write_result = child
         .stdin
         .take()
-        .expect("stdin을 piped로 열었다")
+        .expect("stdin은 piped로 열어 두었다")
         .write_all(text.as_bytes());
-    let output = child.wait_with_output().map_err(|e| e.to_string())?;
-    write_result.map_err(|e| e.to_string())?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| error.to_string())?;
+    write_result.map_err(|error| error.to_string())?;
 
     if output.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr)
-            .lines()
-            .next()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| format!("종료 코드 {}", output.status)))
+        return Ok(());
     }
+    Err(String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("종료 코드 {}", output.status)))
 }

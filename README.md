@@ -13,8 +13,9 @@ Rust 앱은 루트 Cargo workspace로 묶여 있고, `tp-cli`는 pnpm으로 관�
 | [`til-tui`](./til-tui) | TUI (Rust) | 오늘 배운 내용을 주 단위로 쌓는 터미널 메모장 |
 | [`diff-tui`](./diff-tui) | TUI (Rust) | 테스트를 숨기고 현재 변경이나 두 브랜치의 Git diff를 탐색하는 리뷰 도구 |
 | [`tp-cli`](./tp-cli) | CLI (TypeScript) | 디렉터리를 북마크하고 한 번에 이동하는 `tp` 명령 |
+| [`tui-kit`](./tui-kit) | 라이브러리 (Rust) | Rust TUI 앱이 함께 쓰는 터미널 세션, 입력창, 키 안내, SQLite, 클립보드, undo |
 
-`todo-tui`와 `til-tui`는 ratatui + SQLite 구성을 공유합니다.
+Rust 앱은 ratatui + SQLite 구성을 `tui-kit`으로 공유하고, 의존성 버전은 루트 `Cargo.toml`의 `[workspace.dependencies]`에서 관리합니다.
 `tp-cli`는 npm에 `@fru1tworld/tp`로 배포되며, bash·zsh·fish·nushell 셸 함수를 제공합니다.
 
 ## 빌드와 검사

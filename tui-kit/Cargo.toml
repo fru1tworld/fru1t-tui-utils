@@ -1,0 +1,17 @@
+[package]
+name = "tui-kit"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+dirs.workspace = true
+ratatui.workspace = true
+rusqlite.workspace = true
+textwrap.workspace = true
+tui-input.workspace = true
+unicode-width.workspace = true
